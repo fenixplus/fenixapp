@@ -59,7 +59,7 @@ class AppUpdateRepository @Inject constructor(
                 val request = Request.Builder()
                     .url(url)
                     .header("Accept", "application/vnd.github+json")
-                    .header("User-Agent", "FÊNIX +/${BuildConfig.VERSION_NAME}")
+                    .header("User-Agent", "Fenix/${BuildConfig.VERSION_NAME}")
                     .build()
 
                 okHttpClient.newCall(request).execute().use { response ->

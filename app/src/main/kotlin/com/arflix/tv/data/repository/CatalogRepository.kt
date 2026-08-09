@@ -1130,7 +1130,7 @@ class CatalogRepository @Inject constructor(
             try {
                 val request = Request.Builder()
                     .url(url)
-                    .header("User-Agent", OkHttpProvider.userAgentOr("Mozilla/5.0 (Android TV; FÊNIX +)"))
+                    .header("User-Agent", OkHttpProvider.userAgentOr("Mozilla/5.0 (Android TV; Fenix)"))
                     .build()
                 okHttpClient.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) return@use null

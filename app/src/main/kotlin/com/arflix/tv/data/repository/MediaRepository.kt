@@ -367,7 +367,7 @@ class MediaRepository @Inject constructor(
         val request = Request.Builder()
             .url("https://v3-cinemeta.strem.io/meta/$typePath/$imdbId.json")
             .header("Accept", "application/json")
-            .header("User-Agent", OkHttpProvider.userAgentOr("Mozilla/5.0 (Android TV; FÊNIX +)"))
+            .header("User-Agent", OkHttpProvider.userAgentOr("Mozilla/5.0 (Android TV; Fenix)"))
             .build()
 
         runCatching {
@@ -490,7 +490,7 @@ class MediaRepository @Inject constructor(
             val request = Request.Builder()
                 .url(url)
                 .header("Accept", "application/json")
-                .header("User-Agent", OkHttpProvider.userAgentOr("Mozilla/5.0 (Android TV; FÊNIX +)"))
+                .header("User-Agent", OkHttpProvider.userAgentOr("Mozilla/5.0 (Android TV; Fenix)"))
                 .build()
 
             val fetched = runCatching {
@@ -522,7 +522,7 @@ class MediaRepository @Inject constructor(
         val request = Request.Builder()
             .url("https://v3-cinemeta.strem.io/meta/series/$imdbId.json")
             .header("Accept", "application/json")
-            .header("User-Agent", OkHttpProvider.userAgentOr("Mozilla/5.0 (Android TV; FÊNIX +)"))
+            .header("User-Agent", OkHttpProvider.userAgentOr("Mozilla/5.0 (Android TV; Fenix)"))
             .build()
 
         runCatching {
@@ -3597,7 +3597,7 @@ class MediaRepository @Inject constructor(
     private fun fetchUrl(url: String): String? {
         val request = Request.Builder()
             .url(url)
-            .header("User-Agent", OkHttpProvider.userAgentOr("Mozilla/5.0 (Android TV; FÊNIX +)"))
+            .header("User-Agent", OkHttpProvider.userAgentOr("Mozilla/5.0 (Android TV; Fenix)"))
             .build()
         return runCatching {
             okHttpClient.newCall(request).execute().use { response ->

@@ -3772,8 +3772,8 @@ private fun MobileSettingsMainPage(
                     value = if (uiState.updateStatus is com.arflix.tv.updater.UpdateStatus.UpdateAvailable) stringResource(R.string.settings_update_available) else stringResource(R.string.settings_check_updates),
                     isFocused = false,
                     showDivider = false,
-                    enabled = false,
-                    onClick = {}
+                    enabled = uiState.isSelfUpdateSupported,
+                    onClick = { viewModel.checkForAppUpdates(force = true, showNoUpdateFeedback = true) }
                 )
             }
         }
@@ -7997,8 +7997,8 @@ private fun AccountsSettings(
                 else -> stringResource(R.string.settings_badge_check)
             },
             isFocused = focusedIndex == updateRowIndex,
-            enabled = false,
-            onClick = {},
+            enabled = isSelfUpdateSupported,
+            onClick = { if (updateStatus is com.arflix.tv.updater.UpdateStatus.ReadyToInstall) onInstallUpdate() else onCheckUpdates() },
             modifier = Modifier.settingsFocusSlot(updateRowIndex)
         )
     }

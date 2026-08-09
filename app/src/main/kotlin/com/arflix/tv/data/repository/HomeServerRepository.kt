@@ -860,15 +860,15 @@ class HomeServerRepository @Inject constructor(
     }
 
     private fun authHeader(token: String? = null): String {
-        val base = "MediaBrowser Client=\"FÊNIX +\", Device=\"Android\", DeviceId=\"${deviceId()}\", Version=\"${BuildConfig.VERSION_NAME}\""
+        val base = "MediaBrowser Client=\"Fenix\", Device=\"Android\", DeviceId=\"${deviceId()}\", Version=\"${BuildConfig.VERSION_NAME}\""
         return if (token.isNullOrBlank()) base else "$base, Token=\"$token\""
     }
 
     private fun plexPublicHeaders(): Headers = Headers.Builder()
         .add("Accept", "application/json")
-        .add("User-Agent", "FÊNIX +/${BuildConfig.VERSION_NAME}")
+        .add("User-Agent", "Fenix/${BuildConfig.VERSION_NAME}")
         .add("X-Plex-Client-Identifier", deviceId())
-        .add("X-Plex-Product", "FÊNIX +")
+        .add("X-Plex-Product", "Fenix")
         .add("X-Plex-Version", BuildConfig.VERSION_NAME)
         .add("X-Plex-Device", "Android")
         .add("X-Plex-Platform", "Android")
@@ -876,9 +876,9 @@ class HomeServerRepository @Inject constructor(
 
     private fun plexHeaders(token: String? = null): Map<String, String> = buildMap {
         put("Accept", "application/json")
-        put("User-Agent", "FÊNIX +/${BuildConfig.VERSION_NAME}")
+        put("User-Agent", "Fenix/${BuildConfig.VERSION_NAME}")
         put("X-Plex-Client-Identifier", deviceId())
-        put("X-Plex-Product", "FÊNIX +")
+        put("X-Plex-Product", "Fenix")
         put("X-Plex-Version", BuildConfig.VERSION_NAME)
         put("X-Plex-Device", "Android")
         put("X-Plex-Platform", "Android")
@@ -905,7 +905,7 @@ class HomeServerRepository @Inject constructor(
         val builder = Request.Builder()
             .url(url)
             .header("Accept", "application/json")
-            .header("User-Agent", "FÊNIX +/${BuildConfig.VERSION_NAME}")
+            .header("User-Agent", "Fenix/${BuildConfig.VERSION_NAME}")
         if (connection?.serverKind == HomeServerKind.PLEX) {
             plexHeaders(connection.accessToken).forEach { (key, value) -> builder.header(key, value) }
         } else {

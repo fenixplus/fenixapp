@@ -45,7 +45,7 @@ class FenixRepository @Inject constructor(
 ) {
     companion object {
         private const val TAG = "FenixRepository"
-        private const val BOT_USERNAME = "fenixplayer11bot"
+        private const val BOT_USERNAME = "fenixplayerbot"
         private const val CATALOG_QUERY = "catalog="
         private const val STREAMS_MV_QUERY = "streams_mv="
         private const val STREAMS_EP_QUERY = "streams_ep="
