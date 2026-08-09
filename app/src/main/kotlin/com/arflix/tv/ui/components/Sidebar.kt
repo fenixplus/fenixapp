@@ -1,0 +1,322 @@
+package com.arflix.tv.ui.components
+
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.ui.unit.sp
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Home
+import androidx.compose.material.icons.outlined.Bookmark
+import androidx.compose.material.icons.outlined.LiveTv
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material3.Icon
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.tv.material3.ExperimentalTvMaterial3Api
+import androidx.tv.material3.Text
+import com.arflix.tv.data.model.Profile
+import com.arflix.tv.ui.skin.ArvioSkin
+import com.arflix.tv.ui.skin.resolveAccentColor
+import com.arflix.tv.ui.theme.AnimationConstants
+import androidx.annotation.StringRes
+import androidx.compose.ui.res.stringResource
+import com.arflix.tv.R
+import com.arflix.tv.ui.theme.TextSecondary
+
+/**
+ * Premium navigation sidebar with smooth animations
+ * Ultra slim icon-only bar with animated focus states
+ */
+enum class SidebarItem(val icon: ImageVector, @StringRes val labelRes: Int) {
+    SEARCH(Icons.Outlined.Search, R.string.search),
+    HOME(Icons.Outlined.Home, R.string.home),
+    WATCHLIST(Icons.Outlined.Bookmark, R.string.watchlist),
+    TV(Icons.Outlined.LiveTv, R.string.tv_shows),
+    SETTINGS(Icons.Outlined.Settings, R.string.settings)
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+fun Sidebar(
+    selectedItem: SidebarItem = SidebarItem.HOME,
+    isSidebarFocused: Boolean = false,
+    focusedIndex: Int = 1,
+    profile: Profile? = null,
+    hasUpdateBadge: Boolean = false,
+    onProfileClick: () -> Unit = {},
+    onItemSelected: (SidebarItem) -> Unit = {},
+    modifier: Modifier = Modifier
+) {
+    val centerItems = remember {
+        buildList {
+            add(SidebarItem.SEARCH)
+            add(SidebarItem.HOME)
+            add(SidebarItem.WATCHLIST)
+            if (com.arflix.tv.util.FeatureVisibility.SHOW_LIVE_TV) add(SidebarItem.TV)
+        }
+    }
+    val bottomItem = SidebarItem.SETTINGS
+    val hasProfile = profile != null
+    // With profile: index 0 = profile, centerItems size, bottomItem gear.
+    val centerFocusedIndex = if (hasProfile) focusedIndex - 1 else focusedIndex
+    val settingsFocused = if (hasProfile) focusedIndex == centerItems.size + 1 else focusedIndex == centerItems.size
+
+    // Sidebar: subtle transparent gradient so backdrop shows through
+    Box(
+        modifier = modifier
+            .width(56.dp)
+            .fillMaxHeight()
+            .background(
+                Brush.horizontalGradient(
+                    listOf(
+                        Color.Black.copy(alpha = 0.4f),
+                        Color.Black.copy(alpha = 0.2f),
+                        Color.Transparent
+                    )
+                )
+            )
+    ) {
+        Column(
+            modifier = Modifier.fillMaxHeight(),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            // Profile at top
+            if (hasProfile) {
+                Spacer(modifier = Modifier.height(7.dp))
+                SidebarProfileAvatar(
+                    profile = profile!!,
+                    isFocused = isSidebarFocused && focusedIndex == 0
+                )
+                Spacer(modifier = Modifier.height(28.dp))
+            }
+
+            // Flexible space - pushes center group down
+            Spacer(modifier = Modifier.weight(1f))
+
+            // Center group: Search, Home, Watchlist, TV (vertically centered)
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(28.dp)
+            ) {
+                centerItems.forEachIndexed { index, item ->
+                    SidebarIcon(
+                        item = item,
+                        isSelected = item == selectedItem,
+                        isFocused = isSidebarFocused && index == centerFocusedIndex,
+                    )
+                }
+            }
+
+            // Flexible space - pushes settings to bottom
+            Spacer(modifier = Modifier.weight(1f))
+
+            // Settings at bottom
+            SidebarIcon(
+                item = bottomItem,
+                isSelected = bottomItem == selectedItem,
+                isFocused = isSidebarFocused && settingsFocused,
+                hasBadge = hasUpdateBadge
+            )
+            Spacer(modifier = Modifier.height(7.dp))
+        }
+    }
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun SidebarProfileAvatar(
+    profile: Profile,
+    isFocused: Boolean
+) {
+    val scale by animateFloatAsState(
+        targetValue = if (isFocused) 1.12f else 1f,
+        animationSpec = tween(
+            durationMillis = AnimationConstants.DURATION_FAST,
+            easing = AnimationConstants.EaseOut
+        ),
+        label = "profile_scale"
+    )
+    val indicatorAlpha by animateFloatAsState(
+        targetValue = if (isFocused) 1f else 0f,
+        animationSpec = tween(
+            durationMillis = AnimationConstants.DURATION_FAST,
+            easing = AnimationConstants.EaseOut
+        ),
+        label = "profile_indicator"
+    )
+    Box(
+        modifier = Modifier
+            .width(42.dp)
+            .height(34.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        if (indicatorAlpha > 0.01f) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .width(3.dp)
+                    .height(22.dp)
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(ArvioSkin.colors.focusOutline.copy(alpha = indicatorAlpha))
+            )
+        }
+        Box(
+            modifier = Modifier
+                .align(Alignment.Center)
+                .size(30.dp)
+                .clip(CircleShape)
+                .background(Color.Transparent)
+                .graphicsLayer {
+                    scaleX = scale
+                    scaleY = scale
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            ProfileAvatarVisual(
+                profile = profile,
+                letterFontSize = 12.sp,
+                iconPadding = 3.dp
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun SidebarIcon(
+    item: SidebarItem,
+    isSelected: Boolean,
+    isFocused: Boolean,
+    hasBadge: Boolean = false
+) {
+    val accent = resolveAccentColor(fallback = Color.White)
+
+    // Animated icon color - white when focused, accent when selected-only
+    val iconColor by animateColorAsState(
+        targetValue = when {
+            isFocused -> Color.White  // white when D-pad navigating (wins over selected)
+            isSelected -> accent  // ROYGBIV accent when selected (current screen)
+            else -> Color(0xFF444444)  // Darker grey when unfocused
+        },
+        animationSpec = tween(
+            durationMillis = AnimationConstants.DURATION_FAST,
+            easing = AnimationConstants.EaseOut
+        ),
+        label = "icon_color"
+    )
+
+    // Slight scale when focused
+    val scale by animateFloatAsState(
+        targetValue = if (isFocused) 1.12f else 1f,
+        animationSpec = tween(
+            durationMillis = AnimationConstants.DURATION_FAST,
+            easing = AnimationConstants.EaseOut
+        ),
+        label = "icon_scale"
+    )
+
+    val chipBackground by animateColorAsState(
+        targetValue = when {
+            isFocused -> Color.White.copy(alpha = 0.16f)
+            isSelected -> Color.White.copy(alpha = 0.06f)
+            else -> Color.Transparent
+        },
+        animationSpec = tween(
+            durationMillis = AnimationConstants.DURATION_FAST,
+            easing = AnimationConstants.EaseOut
+        ),
+        label = "sidebar_chip_bg"
+    )
+
+    val indicatorAlpha by animateFloatAsState(
+        targetValue = if (isFocused) 1f else 0f,
+        animationSpec = tween(
+            durationMillis = AnimationConstants.DURATION_FAST,
+            easing = AnimationConstants.EaseOut
+        ),
+        label = "sidebar_indicator_alpha"
+    )
+    val label = stringResource(item.labelRes)
+
+    Box(
+        modifier = Modifier
+            .width(42.dp)
+            .height(34.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        if (indicatorAlpha > 0.01f) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .width(3.dp)
+                    .height(22.dp)
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(ArvioSkin.colors.focusOutline.copy(alpha = indicatorAlpha))
+            )
+        }
+
+        Box(
+            modifier = Modifier
+                .align(Alignment.Center)
+                .size(30.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(chipBackground),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = item.icon,
+                contentDescription = label,
+                tint = iconColor,
+                modifier = Modifier
+                    .size(20.dp)
+                    .graphicsLayer {
+                        scaleX = scale
+                        scaleY = scale
+                    }
+            )
+
+            // Update Badge
+            if (hasBadge) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .offset(x = (-4).dp, y = 4.dp)
+                        .size(8.dp)
+                        .clip(CircleShape)
+                        .background(com.arflix.tv.ui.theme.AccentRed)
+                )
+            }
+        }
+    }
+}

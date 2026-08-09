@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- ARVIO TV Splash Theme - Shows immediately on app launch -->
+    <style name="Theme.ArflixTV.Splash" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/background_dark</item>
+        <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
+        <item name="windowSplashScreenAnimationDuration">0</item>
+        <!-- Post-splash transitions to Mobile theme (no fullscreen).
+             TV overrides this in MainActivity.onCreate() before super. -->
+        <item name="postSplashScreenTheme">@style/Theme.ArflixTV.Mobile</item>
+        <item name="android:windowBackground">@color/background_dark</item>
+        <item name="android:windowDisablePreview">true</item>
+        <item name="android:windowIsTranslucent">false</item>
+        <item name="android:backgroundDimEnabled">false</item>
+    </style>
+
+    <!-- ARVIO TV Theme - Arctic Fuse 2 Inspired (TV devices only) -->
+    <style name="Theme.ArflixTV" parent="@style/Theme.Leanback">
+        <item name="android:windowBackground">@color/background_dark</item>
+        <item name="android:colorBackground">@color/background_dark</item>
+        <item name="android:colorPrimary">@color/arctic_white</item>
+        <item name="android:colorAccent">@color/accent_white</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowDisablePreview">true</item>
+        <item name="android:windowIsTranslucent">false</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <!-- AppCompat attributes (no android: prefix) required by MediaRouterThemeHelper.
+             Theme.Leanback inherits from android:Theme.Material, not AppCompat, so these
+             are undefined by default. Without them colorPrimary resolves to #0 and
+             ColorUtils.calculateContrast crashes when the cast chooser dialog opens. -->
+        <item name="colorPrimary">@color/arctic_white</item>
+        <item name="colorPrimaryDark">@color/background_dark</item>
+        <item name="colorAccent">@color/accent_white</item>
+    </style>
+
+    <!-- ARVIO Mobile Theme - AppCompat-based so MediaRouteChooserDialog works (phones/tablets).
+         Does NOT extend Theme.ArflixTV/Leanback — AppCompatDialog requires an AppCompat ancestor. -->
+    <style name="Theme.ArflixTV.Mobile" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowBackground">@color/background_dark</item>
+        <item name="android:colorBackground">@color/background_dark</item>
+        <item name="android:colorPrimary">@color/arctic_white</item>
+        <item name="android:colorAccent">@color/accent_white</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowFullscreen">false</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowDisablePreview">true</item>
+        <item name="android:windowIsTranslucent">false</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <!-- Transparent bars — the dark app background shows through naturally -->
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+        <!-- AppCompat attrs required by MediaRouterThemeHelper (colorPrimary must be non-zero) -->
+        <item name="colorPrimary">@color/arctic_white</item>
+        <item name="colorPrimaryDark">@color/background_dark</item>
+        <item name="colorAccent">@color/accent_white</item>
+    </style>
+</resources>

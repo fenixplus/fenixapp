@@ -1,0 +1,65 @@
+name: Build Check
+
+on:
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: build-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Verify build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Prepare local properties
+        env:
+          LOCAL_PROPERTIES_BASE64: ${{ secrets.LOCAL_PROPERTIES_BASE64 }}
+        run: |
+          if [ -n "$LOCAL_PROPERTIES_BASE64" ]; then
+            printf '%s' "$LOCAL_PROPERTIES_BASE64" | base64 --decode > local.properties
+          fi
+
+      - name: Prepare secrets.properties
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          TRAKT_CLIENT_ID: ${{ secrets.TRAKT_CLIENT_ID }}
+          TRAKT_CLIENT_SECRET: ${{ secrets.TRAKT_CLIENT_SECRET }}
+        run: |
+          echo "SUPABASE_URL=${SUPABASE_URL:-https://your-project.supabase.co}" > secrets.properties
+          echo "SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY:-your-supabase-anon-key}" >> secrets.properties
+          echo "TMDB_API_KEY=${TMDB_API_KEY:-your-tmdb-api-key}" >> secrets.properties
+          echo "TRAKT_CLIENT_ID=${TRAKT_CLIENT_ID:-your-trakt-client-id}" >> secrets.properties
+          echo "TRAKT_CLIENT_SECRET=${TRAKT_CLIENT_SECRET:-your-trakt-client-secret}" >> secrets.properties
+
+      - name: Create CI keystore
+        run: |
+          keytool -genkeypair -keystore arvio.jks -alias arvio \
+            -keyalg RSA -keysize 2048 -validity 1 \
+            -dname "CN=CI" -storepass 815787 -keypass 815787
+
+      - name: Build
+        run: ./gradlew assembleSideloadDebug --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: arvio-sideload-debug-apk
+          path: app/build/outputs/apk/sideload/debug/*.apk
+          if-no-files-found: error
+

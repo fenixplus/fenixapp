@@ -1,0 +1,8 @@
+gradlew text eol=lf
+gradlew.bat text eol=crlf
+# Windows batch scripts must use CRLF (served as-is to users who run them).
+gradlew.bat text eol=crlf
+# The ARVIO installer is served raw by Netlify (its stored bytes reach the user),
+# so pin CRLF into the blob itself by treating it as binary — text-normalization
+# would strip CR from the stored object and hand Windows an LF-only script.
+web/public/vlc-setup.bat -text

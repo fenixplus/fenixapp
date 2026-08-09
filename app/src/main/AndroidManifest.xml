@@ -1,0 +1,156 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Permissions -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- TV Features (not required so the same APK installs on phones/tablets) -->
+    <uses-feature
+        android:name="android.software.leanback"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.touchscreen"
+        android:required="false" />
+
+    <application
+        android:name=".ArflixApplication"
+        android:allowBackup="false"
+        android:banner="@drawable/app_banner"
+        android:enableOnBackInvokedCallback="false"
+        android:extractNativeLibs="false"
+        android:hardwareAccelerated="true"
+        android:largeHeap="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:localeConfig="@xml/locale_config"
+        android:theme="@style/Theme.ArflixTV"
+        android:usesCleartextTraffic="true">
+
+        <profileable
+            android:shell="true"
+            tools:targetApi="q" />
+
+        <meta-data
+            android:name="io.sentry.auto-init"
+            android:value="false" />
+
+        <meta-data
+            android:name="com.google.android.gms.cast.framework.OPTIONS_PROVIDER_CLASS_NAME"
+            android:value="com.arflix.tv.cast.CastOptionsProvider" />
+
+        <!-- Main Activity - Compose Host -->
+        <activity
+            android:name=".MainActivity"
+            android:banner="@drawable/app_banner"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden"
+            android:exported="true"
+            android:hardwareAccelerated="true"
+            android:launchMode="singleTop"
+            android:supportsPictureInPicture="true"
+            android:theme="@style/Theme.ArflixTV.Splash">
+
+            <!-- TV Launcher -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+
+            <!-- Mobile/Tablet Launcher -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- Custom Scheme: fenix://install-pack?url=... -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="fenix" android:host="install-pack" />
+            </intent-filter>
+
+
+
+        </activity>
+
+        <!-- Crash Report Activity -->
+        <activity
+            android:name=".ui.screens.crash.CrashReportActivity"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden"
+            android:exported="false"
+            android:process=":crash"
+            android:theme="@style/Theme.ArflixTV" />
+
+        <!-- Disable default WorkManager initialization for Hilt -->
+        <provider
+            android:name="androidx.startup.InitializationProvider"
+            android:authorities="${applicationId}.androidx-startup"
+            android:exported="false"
+            tools:node="merge">
+            <meta-data
+                android:name="androidx.work.WorkManagerInitializer"
+                android:value="androidx.startup"
+                tools:node="remove" />
+            <meta-data
+                android:name="androidx.emoji2.text.EmojiCompatInitializer"
+                android:value="androidx.startup"
+                tools:node="remove" />
+            <meta-data
+                android:name="io.github.jan.supabase.gotrue.SupabaseInitializer"
+                android:value="androidx.startup"
+                tools:node="remove" />
+            <meta-data
+                android:name="androidx.lifecycle.ProcessLifecycleInitializer"
+                android:value="androidx.startup"
+                tools:node="remove" />
+            <meta-data
+                android:name="com.russhwolf.settings.SettingsInitializer"
+                android:value="androidx.startup"
+                tools:node="remove" />
+        </provider>
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+        <!--
+          PackageInstaller session callback receiver for the in-app APK updater.
+          Without this receiver, STATUS_PENDING_USER_ACTION callbacks from the system
+          installer are dropped and the install never actually happens — which was the
+          root cause of issues #116, #99, #75 where the updater downloaded but never
+          installed the APK on Android 7+ devices.
+          The action is scoped to ${applicationId} so it's unique per flavor/install.
+        -->
+        <receiver
+            android:name=".updater.ApkInstallReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="${applicationId}.INSTALL_COMPLETE" />
+            </intent-filter>
+        </receiver>
+
+        <service
+            android:name=".data.telegram.TelegramProxyService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
+
+    </application>
+
+</manifest>
