@@ -1161,7 +1161,11 @@ fun SettingsScreen(
                                                 }
                                                 "telegram" -> onNavigateToTelegramSettings()
                                                 "update" -> {
-                                                    // Disabled for consistency with mobile
+                                                    if (uiState.updateStatus is com.arflix.tv.updater.UpdateStatus.ReadyToInstall) {
+                                                        viewModel.installAppUpdateOrRequestPermission()
+                                                    } else {
+                                                        viewModel.checkForAppUpdates(force = true, showNoUpdateFeedback = true)
+                                                    }
                                                 }
                                             }
                                         }

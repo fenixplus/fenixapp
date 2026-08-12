@@ -92,6 +92,7 @@ import com.arflix.tv.ui.components.rememberCatalogueRowLayoutMode
 import com.arflix.tv.ui.focus.arvioDpadFocusGroup
 import com.arflix.tv.ui.skin.ArvioFocusableSurface
 import com.arflix.tv.ui.skin.ArvioSkin
+import com.arflix.tv.ui.skin.arvioFocusable
 import com.arflix.tv.ui.skin.rememberArvioCardShape
 import com.arflix.tv.ui.skin.resolveAccentColor
 import com.arflix.tv.ui.theme.ArflixTypography
@@ -408,15 +409,7 @@ fun SearchScreen(
                             true
                         }
                     }
-                    FocusZone.FILTERS -> {
-                        if (focusedFilterIndex > 0) {
-                            focusedFilterIndex--
-                        } else {
-                            focusZone = FocusZone.SEARCH_INPUT
-                            runCatching { searchFocusRequester.requestFocus() }
-                        }
-                        true
-                    }
+                    FocusZone.FILTERS -> false // Let native focus handle it
                     else -> false
                 }
                 Key.DirectionRight -> when (focusZone) {
@@ -433,12 +426,7 @@ fun SearchScreen(
                             true
                         }
                     }
-                    FocusZone.FILTERS -> {
-                        if (focusedFilterIndex < quickFilters.size - 1) {
-                            focusedFilterIndex++
-                        }
-                        true
-                    }
+                    FocusZone.FILTERS -> false // Let native focus handle it
                     else -> false
                 }
                 Key.Enter, Key.DirectionCenter -> {
@@ -454,10 +442,7 @@ fun SearchScreen(
                             searchEditRequestNonce++
                             true
                         }
-                        FocusZone.FILTERS -> {
-                            quickFilters.getOrNull(focusedFilterIndex)?.onSelect?.invoke()
-                            true
-                        }
+                        FocusZone.FILTERS -> false // Let the chips handle the click
                         FocusZone.RESULTS -> {
                             if (hasAiResults) false
                             else {
@@ -546,7 +531,6 @@ fun SearchScreen(
                     filtersFocusRequester = filtersFocusRequester,
                     isTouchDevice = isTouchDevice,
                     modifier = Modifier.align(Alignment.CenterHorizontally),
-                    isRtl = isRtl,
                     onFocused = { index ->
                         focusZone = FocusZone.FILTERS
                         focusedFilterIndex = index
@@ -561,19 +545,6 @@ fun SearchScreen(
                             focusZone = FocusZone.RESULTS
                             currentRowIndex = 0
                             currentItemIndex = 0
-                        }
-                    },
-                    onMoveLeft = {
-                        if (focusedFilterIndex > 0) {
-                            focusedFilterIndex--
-                        } else {
-                            focusZone = FocusZone.SEARCH_INPUT
-                            runCatching { searchFocusRequester.requestFocus() }
-                        }
-                    },
-                    onMoveRight = {
-                        if (focusedFilterIndex < quickFilters.size - 1) {
-                            focusedFilterIndex++
                         }
                     }
                 )
@@ -745,12 +716,9 @@ private fun DiscoverFilterStrip(
     filtersFocusRequester: FocusRequester,
     isTouchDevice: Boolean,
     modifier: Modifier = Modifier,
-    isRtl: Boolean = false,
     onFocused: (Int) -> Unit,
     onMoveUp: () -> Unit,
-    onMoveDown: () -> Unit,
-    onMoveLeft: () -> Unit,
-    onMoveRight: () -> Unit
+    onMoveDown: () -> Unit
 ) {
     if (filters.isEmpty()) return
     val rowState = rememberLazyListState()
@@ -773,9 +741,7 @@ private fun DiscoverFilterStrip(
                 when (event.key) {
                     Key.DirectionUp -> { onMoveUp(); true }
                     Key.DirectionDown -> { onMoveDown(); true }
-                    Key.DirectionLeft -> { if (isRtl) onMoveRight() else onMoveLeft(); true }
-                    Key.DirectionRight -> { if (isRtl) onMoveLeft() else onMoveRight(); true }
-                    Key.Enter, Key.DirectionCenter -> false
+                    // Left/Right and Enter will be handled by the chips themselves
                     else -> false
                 }
             }
@@ -813,49 +779,50 @@ private fun GlowChip(
     useSystemFocusForVisuals: Boolean = true,
     onSelect: () -> Unit
 ) {
-    var systemFocused by remember { mutableStateOf(false) }
-    val focused = isVisuallyFocused || (useSystemFocusForVisuals && systemFocused)
-    val active = focused || isSelected
     val chipShape = RoundedCornerShape(7.dp)
     val accentColor = resolveAccentColor(fallback = Color.White)
-    val backgroundColor = when {
-        focused -> Color.White.copy(alpha = 0.12f)
-        isSelected -> Color.White.copy(alpha = 0.92f)
-        else -> Color.White.copy(alpha = 0.075f)
-    }
-    val borderColor = when {
-        focused -> accentColor
-        isSelected -> Color.White.copy(alpha = 0.92f)
-        else -> Color.White.copy(alpha = 0.24f)
-    }
+    
+    // We use a custom Box with the arvioFocusable modifier directly because
+    // ArvioFocusableSurface is designed for fixed-size cards and would collapse
+    // the wrap-content text of a chip to zero size.
+    var isFocused by remember { mutableStateOf(false) }
+    val visualFocused = isVisuallyFocused || (useSystemFocusForVisuals && isFocused)
+    val active = visualFocused || isSelected
+
     Box(
         modifier = modifier
             .padding(vertical = 2.dp)
+            .arvioFocusable(
+                shape = chipShape,
+                onClick = onSelect,
+                onFocusChanged = { focused ->
+                    isFocused = focused
+                    if (focused) onFocused()
+                },
+                isFocusedOverride = isVisuallyFocused,
+                useSystemFocusForVisuals = useSystemFocusForVisuals,
+                focusedScale = 1.05f,
+                pressedScale = 0.98f,
+                outlineWidth = 2.dp,
+                outlineColor = if (isSelected) Color.White else accentColor,
+                glowWidth = if (visualFocused) 2.dp else 0.dp,
+                glowAlpha = 0.2f
+            )
             .background(
-                color = backgroundColor,
+                color = if (isSelected) Color.White.copy(alpha = 0.92f) else Color.White.copy(alpha = 0.075f),
                 shape = chipShape
             )
-            .border(
-                width = if (focused) 2.5.dp else 1.dp,
-                color = borderColor,
-                shape = chipShape
-            )
-            .clickable { onSelect() }
-            .onFocusChanged {
-                systemFocused = it.isFocused
-                if (it.isFocused) onFocused()
-            }
-            .focusable()
-            .padding(horizontal = 17.dp, vertical = 8.dp)
+            .padding(horizontal = 17.dp, vertical = 8.dp),
+        contentAlignment = Alignment.Center
     ) {
         Text(
-            label,
+            text = label,
             style = ArflixTypography.caption.copy(
                 fontSize = 12.sp,
                 fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium
             ),
             color = when {
-                focused -> Color.White                // White text on dark bg
+                visualFocused -> Color.Black          // Black text on white/accent bg
                 isSelected -> Color.Black             // Black text on bright bg
                 else -> Color.White.copy(alpha = 0.84f)
             },
