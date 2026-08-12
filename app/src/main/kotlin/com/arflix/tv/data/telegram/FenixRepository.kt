@@ -2,8 +2,11 @@ package com.arflix.tv.data.telegram
 
 import android.content.Context
 import android.util.Log
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.stringPreferencesKey
 import com.arflix.tv.R
 import com.arflix.tv.data.model.StreamSource
+import com.arflix.tv.util.telegramDataStore
 import com.google.gson.Gson
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
@@ -11,7 +14,11 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.drinkless.tdlib.TdApi
 import java.io.File
 import javax.inject.Inject
@@ -49,88 +56,185 @@ class FenixRepository @Inject constructor(
         private const val CATALOG_QUERY = "catalog="
         private const val STREAMS_MV_QUERY = "streams_mv="
         private const val STREAMS_EP_QUERY = "streams_ep="
+        
+        private val LAST_CATALOG_VERSION = stringPreferencesKey("last_catalog_version")
     }
 
     private val gson = Gson()
     private val _catalog = MutableStateFlow(FenixCatalog())
     val catalog: StateFlow<FenixCatalog> = _catalog.asStateFlow()
 
-    private var isSyncing = false
+    private val syncMutex = Mutex()
+    private var lastSyncCheckTime = 0L
+    private val SYNC_COOLDOWN_MS = 30 * 1000L // 30 segundos de intervalo entre checagens
 
-    suspend fun syncCatalog() {
-        if (isSyncing || !telegramRepository.isAuthenticated()) {
-            Log.d(TAG, "Sync skipped: syncing=$isSyncing auth=${telegramRepository.isAuthenticated()}")
+    init {
+        // Carregamento inicial do cache local para memória (bloqueante mas rápido para arquivos pequenos)
+        val localCatalogFile = File(context.cacheDir, "fenix_catalog.json")
+        if (localCatalogFile.exists()) {
+            try {
+                val content = localCatalogFile.readText()
+                val parsed = gson.fromJson(content, FenixCatalog::class.java)
+                if (parsed != null) {
+                    _catalog.value = parsed
+                    Log.i(TAG, "🚀 [INIT] Catálogo carregado do cache: ${parsed.movies.size} filmes, ${parsed.series.size} séries")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Erro ao carregar cache inicial: ${e.message}")
+            }
+        }
+    }
+
+    suspend fun syncCatalog(force: Boolean = false) {
+        syncMutex.withLock {
+            val now = System.currentTimeMillis()
+            if (!force && now - lastSyncCheckTime < SYNC_COOLDOWN_MS && _catalog.value.movies.isNotEmpty()) {
+                Log.d(TAG, "Sync skipped: Cooldown ativo (intervalo de ${SYNC_COOLDOWN_MS / 1000}s)")
+                return@withLock
+            }
+
+            // Realizamos a operação de rede em um contexto Não Cancelável para evitar JobCancellationException
+            // quando a HomeViewModel reinicia o carregamento.
+            withContext(NonCancellable + Dispatchers.IO) {
+                if (!telegramRepository.isAuthenticated()) {
+                    Log.d(TAG, "Sync skipped: Telegram not authenticated")
+                    loadLocalCatalog(File(context.cacheDir, "fenix_catalog.json"))
+                    return@withContext
+                }
+
+                Log.i(TAG, "🚀 Iniciando sincronização inteligente do catálogo...")
+                try {
+                    // 1. Get cached version and check local file
+                    val cachedVersion = context.telegramDataStore.data.first()[LAST_CATALOG_VERSION] ?: "0"
+                    val localCatalogFile = File(context.cacheDir, "fenix_catalog.json")
+                    val hasLocalFile = localCatalogFile.exists()
+
+                    Log.d(TAG, "Local state: version=$cachedVersion, exists=$hasLocalFile")
+
+                    // 2. Fetch remote version via inline query (with retry)
+                    var searchBot: TdApi.Object? = null
+                    var retryCount = 0
+                    val maxRetries = 2
+                    
+                    while (retryCount <= maxRetries) {
+                        try {
+                            searchBot = telegramClient.sendRequest(TdApi.SearchPublicChat(BOT_USERNAME))
+                            if (searchBot is TdApi.Chat) break
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Attempt ${retryCount + 1} to search bot failed: ${e.message}")
+                        }
+                        retryCount++
+                        if (retryCount <= maxRetries) delay(2000L * retryCount)
+                    }
+
+                    if (searchBot !is TdApi.Chat) {
+                        Log.e(TAG, "❌ Bot not found after $retryCount attempts. Result: $searchBot")
+                        loadLocalCatalog(localCatalogFile)
+                        return@withContext
+                    }
+                    
+                    val botChatId = searchBot.id
+                    val privateChat = telegramClient.sendRequest(TdApi.CreatePrivateChat(botChatId, false))
+                    val activeChatId = if (privateChat is TdApi.Chat) privateChat.id else botChatId
+
+                    val inlineResults = telegramClient.sendRequest(
+                        TdApi.GetInlineQueryResults(botChatId, activeChatId, TdApi.Location(), CATALOG_QUERY, "")
+                    ) as? TdApi.InlineQueryResults
+                    
+                    if (inlineResults == null || inlineResults.results.isNullOrEmpty()) {
+                        Log.w(TAG, "⚠️ Inline query failed, falling back to local...")
+                        loadLocalCatalog(localCatalogFile)
+                        return@withContext
+                    }
+
+                    val result = inlineResults.results.firstOrNull() as? TdApi.InlineQueryResultDocument
+                    if (result == null) {
+                        Log.e(TAG, "❌ No catalog document in results")
+                        loadLocalCatalog(localCatalogFile)
+                        return@withContext
+                    }
+
+                    val remoteVersion = result.description ?: "unknown"
+                    val fileId = result.document.document.id
+
+                    Log.i(TAG, "Remote Version: $remoteVersion (Local: $cachedVersion)")
+                    
+                    // Marcar sucesso na checagem apenas se chegamos até aqui
+                    lastSyncCheckTime = System.currentTimeMillis()
+
+                    // 3. Compare versions
+                    if (hasLocalFile && remoteVersion == cachedVersion) {
+                        Log.i(TAG, "✅ Catalog version matches. Loading from local cache.")
+                        loadLocalCatalog(localCatalogFile)
+                        return@withContext
+                    }
+
+                    // 4. Download new version with Nudge logic
+                    Log.i(TAG, "📥 New version detected ($remoteVersion). Starting download...")
+                    telegramClient.sendRequest(TdApi.DownloadFile(fileId, 32, 0, 0, true))
+                    
+                    var lastDownloadedSize = -1L
+                    var stagnationStartTime = System.currentTimeMillis()
+                    val totalTimeoutMs = 45_000L
+                    val nudgeIntervalMs = 5_000L
+                    val startSyncTime = System.currentTimeMillis()
+
+                    while (System.currentTimeMillis() - startSyncTime < totalTimeoutMs) {
+                        val file = telegramClient.sendRequest(TdApi.GetFile(fileId)) as? TdApi.File
+                        if (file != null) {
+                            if (file.local?.isDownloadingCompleted == true) {
+                                val downloadedPath = file.local.path
+                                if (!downloadedPath.isNullOrEmpty()) {
+                                    // Copy to a stable location in cache
+                                    File(downloadedPath).copyTo(localCatalogFile, overwrite = true)
+                                    Log.i(TAG, "✅ Download complete. New version saved: $remoteVersion")
+                                    
+                                    // Update DataStore version
+                                    context.telegramDataStore.edit { it[LAST_CATALOG_VERSION] = remoteVersion }
+                                    loadLocalCatalog(localCatalogFile)
+                                    return@withContext
+                                }
+                            }
+
+                            val currentSize = file.local?.downloadedSize ?: 0L
+                            if (currentSize > lastDownloadedSize) {
+                                lastDownloadedSize = currentSize
+                                stagnationStartTime = System.currentTimeMillis()
+                            } else if (System.currentTimeMillis() - stagnationStartTime > nudgeIntervalMs) {
+                                Log.w(TAG, "⏳ Stagnation detected at ${currentSize} bytes. Sending NUDGE...")
+                                telegramClient.sendRequest(TdApi.DownloadFile(fileId, 32, 0, 0, true))
+                                stagnationStartTime = System.currentTimeMillis()
+                            }
+                        }
+                        delay(800)
+                    }
+
+                    Log.e(TAG, "❌ Download timed out after ${totalTimeoutMs/1000}s. Falling back to old local...")
+                    loadLocalCatalog(localCatalogFile)
+
+                } catch (e: Exception) {
+                    Log.e(TAG, "❌ Sync error: ${e.message}", e)
+                    val localCatalogFile = File(context.cacheDir, "fenix_catalog.json")
+                    loadLocalCatalog(localCatalogFile)
+                }
+            }
+        }
+    }
+
+    private suspend fun loadLocalCatalog(file: File) {
+        if (!file.exists()) {
+            Log.w(TAG, "loadLocalCatalog: File does not exist")
             return
         }
-        isSyncing = true
-        Log.i(TAG, "🚀 Syncing catalog...")
-
         try {
-            Log.i(TAG, "STEP 1: Searching for bot @$BOT_USERNAME...")
-            val searchBot = telegramClient.sendRequest(TdApi.SearchPublicChat(BOT_USERNAME))
-            if (searchBot !is TdApi.Chat) {
-                Log.e(TAG, "❌ Bot not found or error: $searchBot")
-                return
-            }
-            val botChatId = searchBot.id
-            Log.i(TAG, "STEP 2: Creating private chat with bot (ID: $botChatId)...")
-            val privateChat = telegramClient.sendRequest(TdApi.CreatePrivateChat(botChatId, false))
-            val activeChatId = if (privateChat is TdApi.Chat) privateChat.id else botChatId
-            Log.i(TAG, "STEP 3: Sending inline query '$CATALOG_QUERY'...")
-
-            val inlineResults = telegramClient.sendRequest(
-                TdApi.GetInlineQueryResults(botChatId, activeChatId, TdApi.Location(), CATALOG_QUERY, "")
-            ) as? TdApi.InlineQueryResults
-            
-            if (inlineResults == null) {
-                Log.e(TAG, "❌ Inline query failed or timed out")
-                return
-            }
-
-            val results = inlineResults.results ?: emptyArray()
-            Log.i(TAG, "STEP 4: Received ${results.size} inline results")
-            var fileId = 0
-            for (res in results) {
-                if (res is TdApi.InlineQueryResultDocument) {
-                    fileId = res.document.document.id
-                    Log.i(TAG, "Found catalog document: fileId=$fileId")
-                    break
-                }
-            }
-
-            if (fileId != 0) {
-                Log.i(TAG, "STEP 5: Downloading catalog file...")
-                telegramClient.sendRequest(TdApi.DownloadFile(fileId, 32, 0, 0, true))
-                var localPath: String? = null
-                var attempts = 0
-                while (attempts < 30) {
-                    val file = telegramClient.sendRequest(TdApi.GetFile(fileId))
-                    if (file is TdApi.File && file.local?.isDownloadingCompleted == true) {
-                        localPath = file.local.path
-                        break
-                    }
-                    if (attempts % 5 == 0) Log.i(TAG, "⏳ Waiting for download (attempt $attempts/30)...")
-                    delay(1000)
-                    attempts++
-                }
-                if (!localPath.isNullOrEmpty()) {
-                    Log.i(TAG, "STEP 6: Reading catalog file from $localPath")
-                    val content = withContext(Dispatchers.IO) { File(localPath).readText() }
-                    val parsed = gson.fromJson(content, FenixCatalog::class.java)
-                    if (parsed != null) {
-                        _catalog.value = parsed
-                        Log.i(TAG, "✅ Catalog synced successfully: ${parsed.movies.size} movies, ${parsed.series.size} series")
-                    }
-                } else {
-                    Log.e(TAG, "❌ Catalog download failed after 30s")
-                }
-            } else {
-                Log.e(TAG, "❌ No catalog document found in inline results")
+            val content = withContext(Dispatchers.IO) { file.readText() }
+            val parsed = gson.fromJson(content, FenixCatalog::class.java)
+            if (parsed != null) {
+                _catalog.value = parsed
+                Log.i(TAG, "📖 Loaded ${parsed.movies.size} movies and ${parsed.series.size} series from local cache")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Sync error: ${e.message}", e)
-        } finally {
-            isSyncing = false
+            Log.e(TAG, "Error reading local catalog: ${e.message}")
         }
     }
 

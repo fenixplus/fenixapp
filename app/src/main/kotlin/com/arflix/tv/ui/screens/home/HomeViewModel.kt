@@ -1641,14 +1641,16 @@ class HomeViewModel @Inject constructor(
         
         // Fenix catalog sync
         viewModelScope.launch {
+            var lastAuthenticatedUserId = -1L
             telegramRepository.authState.collect { state ->
                 val isReady = state is com.arflix.tv.data.telegram.TelegramAuthState.Ready
+                val currentUserId = (state as? com.arflix.tv.data.telegram.TelegramAuthState.Ready)?.userId ?: -1L
+                
                 _uiState.value = _uiState.value.copy(isTelegramAuthenticated = isReady)
                 
-                if (isReady) {
-                    Log.i("HomeVM", "Telegram Ready. Triggering Fenix Catalog Sync...")
-                    fenixRepository.syncCatalog()
-                    // Refresh Home to show Fenix row once catalog is loaded
+                if (isReady && currentUserId != lastAuthenticatedUserId) {
+                    lastAuthenticatedUserId = currentUserId
+                    Log.i("HomeVM", "Telegram Ready (User: $currentUserId). Triggering Home Load (which will sync catalog)...")
                     loadHomeData()
                 }
             }
@@ -2056,19 +2058,21 @@ class HomeViewModel @Inject constructor(
             if (requestId != loadHomeRequestId) return@loadHome
             applyContentLanguageFromPrefs()
 
+            _uiState.value = _uiState.value.copy(isLoading = true, error = null)
+
             try {
-                val fenixCatalog = fenixRepository.catalog.value
-                Log.i("HomeVM", "🔄 Loading Fenix Content. Catalog state: ${fenixCatalog.movies.size} movies, ${fenixCatalog.series.size} series")
-
-                // If Fenix catalog is empty, wait for sync to finish or show loading
-                if (fenixCatalog.movies.isEmpty() && fenixCatalog.series.isEmpty()) {
-                    Log.w("HomeVM", "⌛ Fenix Catalog is EMPTY. Waiting for sync...")
-                    _uiState.value = _uiState.value.copy(isLoading = true, error = "Sincronizando com Fenix...")
-                    return@loadHome
+                // 1. Garantir sincronização do catálogo Fenix antes de processar as linhas
+                // Só dispara sincronização remota se o Telegram estiver autenticado.
+                if (telegramRepository.isAuthenticated()) {
+                    Log.d("HomeVM", "⏳ Aguardando sincronização do catálogo Fenix...")
+                    fenixRepository.syncCatalog()
+                } else {
+                    Log.d("HomeVM", "⏭️ Skip Fenix sync: Not authenticated. Using local state.")
                 }
-
-                _uiState.value = _uiState.value.copy(isLoading = true, error = null)
                 
+                val fenixCatalog = fenixRepository.catalog.value
+                Log.i("HomeVM", "🔄 Sincronização concluída. Carregando conteúdo. Movies: ${fenixCatalog.movies.size}, Series: ${fenixCatalog.series.size}")
+
                 val baseCategories = withContext(networkDispatcher) {
                     mediaRepository.getHomeCategories()
                 }

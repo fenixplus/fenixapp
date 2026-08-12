@@ -596,10 +596,13 @@ fun HomeScreen(
     // an invisible UI.
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
-    // Force redirection to Telegram if not authenticated
+    // Force redirection to Telegram if not authenticated (with debounce to avoid flicker)
     LaunchedEffect(uiState.isTelegramAuthenticated) {
         if (!uiState.isTelegramAuthenticated) {
-            onNavigateToTelegram()
+            delay(1000L) // Aguarda 1s para estabilizar o estado após login/boot
+            if (!uiState.isTelegramAuthenticated) {
+                onNavigateToTelegram()
+            }
         }
     }
     // Per-card logo reads now come from a stable snapshotStateMap so a single
