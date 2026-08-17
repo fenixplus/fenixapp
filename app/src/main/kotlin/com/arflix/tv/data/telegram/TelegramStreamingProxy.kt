@@ -103,7 +103,7 @@ class TelegramStreamingProxy @Inject constructor(
         // Garantir que temos uma porta válida (caso o findFreePort no init tenha falhado ou a porta tenha sido liberada)
         if (port == 0) port = findFreePort()
         
-        server = embeddedServer(CIO, port = port, host = "127.0.0.1") {
+        server = embeddedServer(CIO, port = port, host = "0.0.0.0") {
             routing {
                 get("/file/{fileId}") {
                     val fileId = call.parameters["fileId"]?.toIntOrNull()

@@ -156,6 +156,7 @@ import com.arflix.tv.ui.components.PlaybackQualityBadgeRow
 import com.arflix.tv.ui.components.buildPlaybackBadges
 import androidx.compose.ui.text.style.TextOverflow
 import com.arflix.tv.util.LocalDeviceType
+import com.arflix.tv.util.DeviceIpAddress
 import com.arflix.tv.util.settingsDataStore
 import com.arflix.tv.util.weightedSubtitleScore
 import com.arflix.tv.ui.skin.LocalAccentColorOverride
@@ -1553,14 +1554,22 @@ fun PlayerScreen(
     LaunchedEffect(castState) {
         when (castState) {
             is CastManager.CastState.Casting -> {
-                val url = uiState.selectedStreamUrl ?: return@LaunchedEffect
+                var url = uiState.selectedStreamUrl ?: return@LaunchedEffect
+
+                // Replace loopback address with device IP for external connections (Chromecast)
+                if (url.contains("127.0.0.1") || url.contains("localhost")) {
+                    DeviceIpAddress.get(context)?.let { ip ->
+                        url = url.replace("127.0.0.1", ip).replace("localhost", ip)
+                    }
+                }
+
                 val posMs = if (!playerReleased) exoPlayer.currentPosition else 0L
                 if (!playerReleased) exoPlayer.pause()
                 castManager.loadMedia(
                     url = url,
                     title = uiState.title,
                     imageUrl = uiState.backdropUrl,
-                    mimeType = guessCastMimeType(url),
+                    mimeType = guessCastMimeType(url, uiState.selectedStream),
                     positionMs = posMs
                 )
             }
@@ -6412,8 +6421,17 @@ private fun PlayerSubtitleSettingRow(
     }
 }
 
-private fun guessCastMimeType(url: String): String = when {
-    url.contains(".m3u8", ignoreCase = true) -> "application/x-mpegURL"
-    url.contains(".mpd", ignoreCase = true)  -> "application/dash+xml"
-    else                                     -> "video/mp4"
+private fun guessCastMimeType(url: String, stream: StreamSource? = null): String {
+    val urlLower = url.lowercase()
+    if (urlLower.contains(".m3u8")) return "application/x-mpegURL"
+    if (urlLower.contains(".mpd")) return "application/dash+xml"
+
+    val isTelegram = stream?.addonId?.contains("telegram", ignoreCase = true) == true
+    val filename = stream?.behaviorHints?.filename?.lowercase() ?: ""
+
+    return when {
+        isTelegram || filename.endsWith(".mkv") -> "video/x-matroska"
+        filename.endsWith(".mp4") -> "video/mp4"
+        else -> "video/mp4"
+    }
 }
