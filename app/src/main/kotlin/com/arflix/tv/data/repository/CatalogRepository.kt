@@ -178,6 +178,13 @@ class CatalogRepository @Inject constructor(
             parseCatalogsJson(prefs[catalogsKey(profileId)]).distinctBy { it.id }
         )
         val resolved = sanitizeCollectionCatalogs(readCatalogsFromPrefs(profileId, prefs))
+        
+        // AUTO-INITIALIZATION: If no catalogs exist for this profile, seed with defaults.
+        if (resolved.isEmpty()) {
+            val defaults = MediaRepository.buildPreinstalledDefaults()
+            return ensurePreinstalledDefaults(defaults, resolved)
+        }
+
         // One-time migration/sync for old keys and merged legacy custom entries.
         if (resolved.isNotEmpty() && resolved != primary) {
             saveCatalogs(resolved)
@@ -351,7 +358,10 @@ class CatalogRepository @Inject constructor(
         return ensurePreinstalledDefaults(defaultPreinstalled)
     }
 
-    suspend fun ensurePreinstalledDefaults(defaultPreinstalled: List<CatalogConfig>): List<CatalogConfig> {
+    suspend fun ensurePreinstalledDefaults(
+        defaultPreinstalled: List<CatalogConfig>,
+        existingOverride: List<CatalogConfig>? = null
+    ): List<CatalogConfig> {
         val profileId = activeProfileId()
         val prefs = context.settingsDataStore.data.first()
         val hidden = decodeHiddenPreinstalled(profileId, prefs)
@@ -362,7 +372,7 @@ class CatalogRepository @Inject constructor(
         }
 
         val defaultIds = defaultPreinstalled.map { it.id }.toSet()
-        val existing = getCatalogs().mapNotNull { cfg ->
+        val existing = (existingOverride ?: getCatalogs()).mapNotNull { cfg ->
             if ((cfg.kind == CatalogKind.COLLECTION || cfg.kind == CatalogKind.COLLECTION_RAIL) &&
                 !defaultIds.contains(cfg.id)
             ) {

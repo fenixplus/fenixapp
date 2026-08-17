@@ -532,9 +532,7 @@ class SettingsViewModel @Inject constructor(
 
             val subtitleOptions = loadSubtitleOptions(defaultSub)
             val audioLanguageOptions = loadAudioLanguageOptions(defaultAudio)
-            val existingCatalogs = visibleCatalogs(
-                catalogRepository.ensurePreinstalledDefaults(mediaRepository.getDefaultCatalogConfigs())
-            )
+            val existingCatalogs = visibleCatalogs(catalogRepository.getCatalogs())
 
             val currentState = _uiState.value
             _uiState.value = currentState.copy(
