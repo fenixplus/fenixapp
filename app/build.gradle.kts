@@ -29,8 +29,8 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         minSdk = 23
         targetSdk = 36
-        versionCode = 104
-        versionName = "1.0.4"
+        versionCode = 106
+        versionName = "1.0.6"
         buildConfigField("String", "GITHUB_OWNER", "\"fenixplus\"")
         buildConfigField("String", "GITHUB_REPO", "\"fenixapp\"")
         buildConfigField("Boolean", "FEATURE_PLUGINS_ENABLED", "false")

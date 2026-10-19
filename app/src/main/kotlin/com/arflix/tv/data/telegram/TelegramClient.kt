@@ -122,6 +122,12 @@ class TelegramClient @Inject constructor(
             }
             p.applicationVersion = "1.0"
         }, null)
+
+        // Native TDLib cache limits (Protects low storage devices like Fire Stick)
+        // 1GB max cache size
+        client?.send(TdApi.SetOption("storage_max_files_size", TdApi.OptionValueInteger(1024L * 1024L * 1024L)), null)
+        // Max time from last access: 1 day
+        client?.send(TdApi.SetOption("storage_max_time_from_last_access", TdApi.OptionValueInteger(86400L)), null)
     }
 
     private fun handleUpdate(obj: TdApi.Object) {

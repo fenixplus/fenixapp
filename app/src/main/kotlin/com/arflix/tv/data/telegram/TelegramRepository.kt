@@ -66,6 +66,9 @@ class TelegramRepository @Inject constructor(
             File(context.filesDir, "tdlib").deleteRecursively()
             File(context.filesDir, "tdlib_files").deleteRecursively()
         } else {
+            // Clear orphan video chunks from previous abrupt closures
+            // before initializing TDLib, avoiding ENOSPC on device.
+            clearCache()
             client.initialize()
         }
     }
