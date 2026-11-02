@@ -213,7 +213,9 @@ data class SettingsUiState(
     val subtitleAiModel: SubtitleAiModel = SubtitleAiModel.GROQ_LLAMA_70B,
     val subtitleRemoveHearingImpaired: Boolean = true,
     val aiKeyServerState: AiKeyServerState = AiKeyServerState(),
-    val smoothScrolling: Boolean = true
+    val smoothScrolling: Boolean = true,
+    val hasParentalPin: Boolean = false,
+    val hasKidsProfile: Boolean = false
 )
 
 @HiltViewModel
@@ -388,6 +390,25 @@ class SettingsViewModel @Inject constructor(
         observeCatalogs()
         initializeUpdaterState()
         checkForAppUpdates(force = false, showNoUpdateFeedback = false)
+        observeParentalPin()
+    }
+
+    private fun observeParentalPin() {
+        viewModelScope.launch {
+            kotlinx.coroutines.flow.combine(
+                profileRepository.profiles,
+                profileRepository.parentPin
+            ) { profiles, pin ->
+                val hasKids = profiles.any { it.isKidsProfile }
+                val hasPin = !pin.isNullOrEmpty() || profiles.any { it.isKidsProfile && !it.parentPin.isNullOrEmpty() }
+                Pair(hasKids, hasPin)
+            }.collect { (hasKids, hasPin) ->
+                _uiState.value = _uiState.value.copy(
+                    hasKidsProfile = hasKids,
+                    hasParentalPin = hasPin
+                )
+            }
+        }
     }
 
     private fun observeIptvGroupPrefs() {
@@ -1117,6 +1138,22 @@ class SettingsViewModel @Inject constructor(
             }
             _uiState.value = _uiState.value.copy(skipProfileSelection = skip)
             syncLocalStateToCloud(silent = true)
+        }
+    }
+
+    suspend fun verifyParentalPin(pin: String): Boolean {
+        val currentPin = profileRepository.getParentPin() ?: return false
+        return com.arflix.tv.util.PinUtil.verifyPin(pin, currentPin)
+    }
+
+    fun setParentalPin(pin: String) {
+        viewModelScope.launch {
+            val hashed = com.arflix.tv.util.PinUtil.hashPin(pin)
+            profileRepository.setParentPin(hashed)
+            _uiState.value = _uiState.value.copy(
+                toastMessage = context.getString(R.string.profile_parent_pin_saved),
+                toastType = ToastType.SUCCESS
+            )
         }
     }
 

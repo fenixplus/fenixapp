@@ -67,6 +67,12 @@ val bottomBarItems = buildList {
     add(BottomBarItem(R.string.settings, Icons.Default.Settings, "settings"))
 }
 
+/** Bottom clearance applied inside scrolling content rather than to its viewport. */
+val LocalBottomBarInset = androidx.compose.runtime.staticCompositionLocalOf { 0.dp }
+
+/** Full height of the bottom bar including system navigation bar insets when visible. */
+val LocalBottomBarHeight = androidx.compose.runtime.staticCompositionLocalOf { 0.dp }
+
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
 fun AppBottomBar(

@@ -7,6 +7,7 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -32,6 +33,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -39,11 +41,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
@@ -82,8 +86,12 @@ fun NextEpisodeOverlay(
     var internalFocusedButton by remember(isVisible) { mutableIntStateOf(0) } // 0 = play, 1 = cancel
     var countdown by remember(isVisible) { mutableIntStateOf(countdownSeconds) }
     var progress by remember(isVisible) { mutableFloatStateOf(1f) }
-    val overlayFocusRequester = remember { FocusRequester() }
+    val playFocusRequester = remember { FocusRequester() }
+    val cancelFocusRequester = remember { FocusRequester() }
+    var playFocused by remember { mutableStateOf(false) }
+    var cancelFocused by remember { mutableStateOf(false) }
     val focusedButton = focusedButtonOverride ?: internalFocusedButton
+
     fun updateFocusedButton(value: Int) {
         val clamped = value.coerceIn(0, 1)
         if (focusedButtonOverride == null) {
@@ -94,7 +102,23 @@ fun NextEpisodeOverlay(
 
     LaunchedEffect(isVisible) {
         if (isVisible) {
-            runCatching { overlayFocusRequester.requestFocus() }
+            delay(150)
+            val req = if (focusedButton == 1) cancelFocusRequester else playFocusRequester
+            runCatching { req.requestFocus() }
+            delay(100)
+            if (!playFocused && !cancelFocused) {
+                runCatching { req.requestFocus() }
+            }
+        }
+    }
+
+    LaunchedEffect(focusedButton, isVisible) {
+        if (isVisible) {
+            if (focusedButton == 0 && !playFocused) {
+                runCatching { playFocusRequester.requestFocus() }
+            } else if (focusedButton == 1 && !cancelFocused) {
+                runCatching { cancelFocusRequester.requestFocus() }
+            }
         }
     }
 
@@ -113,42 +137,22 @@ fun NextEpisodeOverlay(
         }
     }
 
+    fun isSelectKey(event: androidx.compose.ui.input.key.KeyEvent): Boolean {
+        if (event.type != KeyEventType.KeyDown) return false
+        val code = event.nativeKeyEvent.keyCode
+        return event.key == Key.Enter ||
+            event.key == Key.DirectionCenter ||
+            event.key == Key.NumPadEnter ||
+            code == 23 || code == 66 || code == 160 || code == 96
+    }
+
     AnimatedVisibility(
         visible = isVisible,
         enter = fadeIn() + slideInHorizontally(initialOffsetX = { it }),
         exit = fadeOut() + slideOutHorizontally(targetOffsetX = { it })
     ) {
         Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .focusRequester(overlayFocusRequester)
-                .focusable()
-                .onPreviewKeyEvent { event ->
-                    if (event.type == KeyEventType.KeyDown) {
-                        when (event.key) {
-                            Key.Back, Key.Escape -> {
-                                onCancel()
-                                true
-                            }
-                            Key.DirectionLeft -> {
-                                updateFocusedButton(focusedButton - 1)
-                                true
-                            }
-                            Key.DirectionRight -> {
-                                updateFocusedButton(focusedButton + 1)
-                                true
-                            }
-                            Key.Enter, Key.DirectionCenter -> {
-                                when (focusedButton) {
-                                    0 -> onPlayNext()
-                                    1 -> onCancel()
-                                }
-                                true
-                            }
-                            else -> false
-                        }
-                    } else false
-                },
+            modifier = Modifier.fillMaxSize(),
             contentAlignment = Alignment.BottomEnd
         ) {
             // Card positioned at bottom right
@@ -283,19 +287,52 @@ fun NextEpisodeOverlay(
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         // Play button
+                        val isPlayActive = playFocused || (focusedButton == 0 && !cancelFocused)
                         Box(
                             modifier = Modifier
                                 .weight(1f)
                                 .height(48.dp)
+                                .focusRequester(playFocusRequester)
+                                .onFocusChanged { state ->
+                                    playFocused = state.isFocused
+                                    if (state.isFocused) updateFocusedButton(0)
+                                }
+                                .focusable()
+                                .onKeyEvent { event ->
+                                    if (event.type == KeyEventType.KeyDown) {
+                                        when {
+                                            isSelectKey(event) -> {
+                                                onPlayNext()
+                                                true
+                                            }
+                                            event.key == Key.DirectionRight -> {
+                                                updateFocusedButton(1)
+                                                runCatching { cancelFocusRequester.requestFocus() }
+                                                true
+                                            }
+                                            event.key == Key.Back || event.key == Key.Escape || event.nativeKeyEvent.keyCode == 4 -> {
+                                                onCancel()
+                                                true
+                                            }
+                                            event.key == Key.DirectionUp || event.key == Key.DirectionDown -> true
+                                            else -> false
+                                        }
+                                    } else false
+                                }
+                                .clip(RoundedCornerShape(12.dp))
                                 .background(
-                                    if (focusedButton == 0) Pink else Color.White.copy(alpha = 0.1f),
+                                    if (isPlayActive) Color.White else Color.White.copy(alpha = 0.12f),
                                     RoundedCornerShape(12.dp)
                                 )
                                 .border(
-                                    width = if (focusedButton == 0) 0.dp else 1.dp,
-                                    color = Color.White.copy(alpha = 0.2f),
+                                    width = 1.dp,
+                                    color = if (isPlayActive) Color.White else Color.White.copy(alpha = 0.25f),
                                     shape = RoundedCornerShape(12.dp)
-                                ),
+                                )
+                                .clickable {
+                                    updateFocusedButton(0)
+                                    onPlayNext()
+                                },
                             contentAlignment = Alignment.Center
                         ) {
                             Row(
@@ -305,37 +342,70 @@ fun NextEpisodeOverlay(
                                 Icon(
                                     imageVector = Icons.Default.PlayArrow,
                                     contentDescription = null,
-                                    tint = if (focusedButton == 0) Color.Black else TextSecondary,
+                                    tint = if (isPlayActive) Color.Black else Color.White,
                                     modifier = Modifier.size(24.dp)
                                 )
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text(
                                     text = stringResource(R.string.play).uppercase(),
                                     style = ArflixTypography.button,
-                                    color = if (focusedButton == 0) Color.Black else TextSecondary
+                                    color = if (isPlayActive) Color.Black else Color.White
                                 )
                             }
                         }
 
                         // Cancel button
+                        val isCancelActive = cancelFocused || (focusedButton == 1 && !playFocused)
                         Box(
                             modifier = Modifier
                                 .size(48.dp)
+                                .focusRequester(cancelFocusRequester)
+                                .onFocusChanged { state ->
+                                    cancelFocused = state.isFocused
+                                    if (state.isFocused) updateFocusedButton(1)
+                                }
+                                .focusable()
+                                .onKeyEvent { event ->
+                                    if (event.type == KeyEventType.KeyDown) {
+                                        when {
+                                            isSelectKey(event) -> {
+                                                onCancel()
+                                                true
+                                            }
+                                            event.key == Key.DirectionLeft -> {
+                                                updateFocusedButton(0)
+                                                runCatching { playFocusRequester.requestFocus() }
+                                                true
+                                            }
+                                            event.key == Key.Back || event.key == Key.Escape || event.nativeKeyEvent.keyCode == 4 -> {
+                                                onCancel()
+                                                true
+                                            }
+                                            event.key == Key.DirectionUp || event.key == Key.DirectionDown -> true
+                                            else -> false
+                                        }
+                                    } else false
+                                }
+                                .clip(RoundedCornerShape(12.dp))
                                 .background(
-                                    if (focusedButton == 1) Color.White else Color.White.copy(alpha = 0.1f),
+                                    if (isCancelActive) Color.White else Color.White.copy(alpha = 0.12f),
                                     RoundedCornerShape(12.dp)
                                 )
                                 .border(
-                                    width = if (focusedButton == 1) 0.dp else 1.dp,
-                                    color = Color.White.copy(alpha = 0.2f),
+                                    width = 1.dp,
+                                    color = if (isCancelActive) Color.White else Color.White.copy(alpha = 0.25f),
                                     shape = RoundedCornerShape(12.dp)
-                                ),
+                                )
+                                .clickable {
+                                    updateFocusedButton(1)
+                                    onCancel()
+                                },
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Close,
                                 contentDescription = stringResource(R.string.cancel),
-                                tint = if (focusedButton == 1) Color.Black else TextSecondary,
+                                tint = if (isCancelActive) Color.Black else Color.White.copy(alpha = 0.7f),
                                 modifier = Modifier.size(24.dp)
                             )
                         }

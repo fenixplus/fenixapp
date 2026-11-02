@@ -55,7 +55,7 @@ object Constants {
         get() = usableSecret(BuildConfig.TRAKT_CLIENT_SECRET)
 
     // Image URLs - tuned for TV quality with smooth scrolling/perf.
-    const val IMAGE_BASE = "https://image.tmdb.org/t/p/w780"
+    const val IMAGE_BASE = "https://image.tmdb.org/t/p/w500"
     const val IMAGE_BASE_LARGE = "https://image.tmdb.org/t/p/w1280"
     const val BACKDROP_BASE = "https://image.tmdb.org/t/p/w1280"
     // Full quality for hero and detail backdrops; loading speed is handled by

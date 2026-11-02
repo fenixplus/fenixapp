@@ -53,7 +53,16 @@ enum class CollectionSourceKind {
     // to complete curated franchise rows with community-maintained extras
     // (upcoming titles, spin-offs) without requiring the user to have any
     // Stremio addon installed — the endpoint is anonymous and cache-friendly.
-    MDBLIST_PUBLIC
+    MDBLIST_PUBLIC,
+    // Generic TMDB /discover query built from `discoverParams` (raw TMDB query
+    // keys such as with_companies / with_networks / primary_release_date.gte).
+    // Lets imported collections (e.g. Nuvio exports) describe any discover
+    // filter without a dedicated source kind per filter.
+    TMDB_DISCOVER,
+    // Public TMDB v3 list (`/list/{id}`), mixed movies and series in list order.
+    TMDB_LIST,
+    // Public Trakt list by numeric id or slug (`trakt.tv/lists/{id}`).
+    TRAKT_LIST
 }
 
 data class CollectionSourceConfig(
@@ -62,8 +71,10 @@ data class CollectionSourceConfig(
     val addonId: String? = null,
     val addonCatalogType: String? = null,
     val addonCatalogId: String? = null,
+    val addonGenre: String? = null,
     val tmdbGenreId: Int? = null,
     val tmdbPersonId: Int? = null,
+    val tmdbCreditRole: String? = null,
     val tmdbCollectionId: Int? = null,
     val tmdbKeywordId: Int? = null,
     val tmdbWatchProviderId: Int? = null,
@@ -74,7 +85,10 @@ data class CollectionSourceConfig(
     val curatedRefs: List<String>? = null,
     // Path component after /lists/, e.g. "jxduffy/star-wars-chronological-order".
     // Resolved against the public mdblist JSON endpoint at runtime.
-    val mdblistSlug: String? = null
+    val mdblistSlug: String? = null,
+    val discoverParams: Map<String, String>? = null,
+    val tmdbListId: Int? = null,
+    val traktListId: String? = null
 ) : Serializable
 
 data class CatalogConfig(
@@ -102,8 +116,12 @@ data class CatalogConfig(
     val collectionSources: List<CollectionSourceConfig> = emptyList(),
     val requiredAddonUrls: List<String> = emptyList(),
     val packId: String? = null,
-    val packName: String? = null
+    val packName: String? = null,
+    val collectionRailKey: String? = null
 ) : Serializable
+
+val CatalogConfig.collectionRailKeyOrGroup: String?
+    get() = collectionRailKey ?: collectionGroup?.name
 
 val CatalogConfig.effectivePackId: String
     get() = packId ?: when (sourceType) {

@@ -171,7 +171,20 @@ data class PlayerUiState(
     // Plot synopsis from TMDB, used in the pause overlay metadata block
     val overview: String? = null,
     // Release year extracted from TMDB releaseDate/firstAirDate (e.g. "2023")
-    val releaseYear: String? = null
+    val releaseYear: String? = null,
+    val mediaType: MediaType = MediaType.MOVIE,
+    val seasonNumber: Int? = null,
+    val episodeNumber: Int? = null,
+    val seasonEpisodes: List<com.arflix.tv.data.model.Episode> = emptyList(),
+    val autoSkipIntro: Boolean = false,
+    val autoSkipOutro: Boolean = false,
+    val audioDelayMs: Long = 0L,
+    val audioNormalization: Boolean = false,
+    val subtitleSizePct: Int = 100,
+    val subtitleVerticalPct: Int = 2,
+    val subtitleFont: String = SubtitleFontOption.DefaultPreference,
+    val filterSubtitlesByLanguage: Boolean = false,
+    val subtitleRemoveHearingImpaired: Boolean = false
 )
 
 
@@ -198,7 +211,9 @@ class PlayerViewModel @Inject constructor(
     private val tmdbApi: TmdbApi,
     private val skipIntroRepository: SkipIntroRepository,
     private val playbackTelemetryRepository: PlaybackTelemetryRepository,
-    private val telegramRepository: TelegramRepository
+    private val telegramRepository: TelegramRepository,
+    private val fenixRepository: com.arflix.tv.data.telegram.FenixRepository,
+    private val kidsContentFilter: com.arflix.tv.data.repository.KidsContentFilter
 ) : ViewModel() {
 
     init {
@@ -518,6 +533,7 @@ class PlayerViewModel @Inject constructor(
         playbackErrorReportJob?.cancel()
         primaryStreamResolutionFinal = false
         hasManualSubtitleSelection = false
+        fenixRepository.cancelBackgroundBatchCheck()
         userPickedSubtitle = false
         autoMatchAttempted = false
         aiSourceSubtitle = null
@@ -526,6 +542,12 @@ class PlayerViewModel @Inject constructor(
         _uiState.value = _uiState.value.copy(
             isLoading = true,
             isLoadingStreams = false,
+            mediaType = mediaType,
+            seasonNumber = seasonNumber,
+            episodeNumber = episodeNumber,
+            overview = cachedItem?.overview,
+            releaseYear = cachedItem?.year?.ifBlank { null } ?: cachedItem?.releaseDate?.take(4),
+            seasonEpisodes = emptyList(),
             selectedSubtitle = null,
             // A new video means a new subtitle universe — stale externals from the previous
             // title poisoned both the picker and the match scan (references from the new video
@@ -542,6 +564,57 @@ class PlayerViewModel @Inject constructor(
             isSetupError = false
         )
         
+        if (mediaType == MediaType.TV && seasonNumber != null) {
+            viewModelScope.launch(Dispatchers.IO) {
+                var eps: List<com.arflix.tv.data.model.Episode> = emptyList()
+
+                // 1. Prioriza a estrutura oficial de temporadas e episódios do Bot (Fenix)
+                val fenixSeasons = runCatching { fenixRepository.getSeasons(mediaId) }.getOrNull().orEmpty()
+                val targetSeason = fenixSeasons.firstOrNull { it.seasonNumber == seasonNumber }
+                if (targetSeason != null && targetSeason.episodeCount > 0) {
+                    val episodeNums = if (targetSeason.episodeNumbers.isNotEmpty()) targetSeason.episodeNumbers else (1..targetSeason.episodeCount).toList()
+                    eps = episodeNums.map { epNum ->
+                        com.arflix.tv.data.model.Episode(
+                            id = -1,
+                            episodeNumber = epNum,
+                            seasonNumber = targetSeason.seasonNumber,
+                            name = "Episódio $epNum",
+                            overview = "Temporada ${targetSeason.seasonNumber}",
+                            stillPath = null,
+                            airDate = "",
+                            isWatched = false
+                        )
+                    }
+                }
+
+                // 2. Se a série não for do Bot ou não tiver temporadas no bot, fallback para TMDB
+                if (eps.isEmpty()) {
+                    eps = runCatching { mediaRepository.getSeasonEpisodes(mediaId, seasonNumber) }.getOrDefault(emptyList())
+                }
+
+                if (eps.isNotEmpty()) {
+                    val watchedKeys = runCatching {
+                        traktRepository.getWatchedEpisodesForShow(mediaId)
+                    }.getOrDefault(emptySet())
+
+                    val decorated = if (watchedKeys.isNotEmpty()) {
+                        eps.map { ep ->
+                            val fenixKey = "fenix:$mediaId:$seasonNumber:${ep.episodeNumber}"
+                            val standardKey = "$mediaId:$seasonNumber:${ep.episodeNumber}"
+                            if (watchedKeys.contains(fenixKey) || watchedKeys.contains(standardKey)) {
+                                ep.copy(isWatched = true)
+                            } else {
+                                ep
+                            }
+                        }
+                    } else {
+                        eps
+                    }
+                    _uiState.value = _uiState.value.copy(seasonEpisodes = decorated)
+                }
+            }
+        }
+        
         lastTopPrewarmKey = ""
         skipIntervalsJob?.cancel()
         currentImdbId = providedImdbId
@@ -554,6 +627,16 @@ class PlayerViewModel @Inject constructor(
         currentItemTitle = cachedItem?.title ?: ""
 
         viewModelScope.launch {
+            if (!isLiveStreamPlayback && mediaId > 0 && !kidsContentFilter.isAllowed(mediaType, mediaId)) {
+                _uiState.value = _uiState.value.copy(
+                    isLoading = false,
+                    isLoadingStreams = false,
+                    sourceSearchActive = false,
+                    error = context.getString(R.string.kids_content_blocked)
+                )
+                return@launch
+            }
+
             // Autoplay should always use the current highest-ranked source list.
             // Explicit source navigation still passes preferred fields or a URL below.
             val preferredAudioLanguage = resolvePreferredAudioLanguage()
@@ -595,10 +678,13 @@ class PlayerViewModel @Inject constructor(
             translationManager.isEnabled = false
             translationManager.reset()
 
-            _uiState.value = PlayerUiState(
+            _uiState.value = _uiState.value.copy(
                 isLoading = true,
                 isLoadingStreams = true,
                 sourceSearchActive = true,
+                mediaType = mediaType,
+                seasonNumber = seasonNumber,
+                episodeNumber = episodeNumber,
                 title = cachedItem?.title ?: currentItemTitle,
                 backdropUrl = cachedItem?.backdrop?.takeIf { it.isNotBlank() }
                     ?: cachedItem?.image?.takeIf { it.isNotBlank() },
@@ -4114,26 +4200,61 @@ class PlayerViewModel @Inject constructor(
                     )
                 }
 
-                // When a TV episode completes, immediately save the next episode to
-                // local Continue Watching so CW isn't empty between episodes.
+                // When a TV episode completes, check if there is an actual next episode
                 val cwSeason = currentSeason
                 val cwEpisode = currentEpisode
                 if (currentMediaType == MediaType.TV && cwSeason != null && cwEpisode != null) {
                     try {
-                        val nextEpisode = cwEpisode + 1
-                        traktRepository.saveLocalContinueWatching(
-                            mediaType = currentMediaType,
-                            tmdbId = currentMediaId,
-                            title = currentItemTitle.ifEmpty { currentTitle },
-                            posterPath = currentPoster,
-                            backdropPath = currentBackdrop,
-                            season = cwSeason,
-                            episode = nextEpisode,
-                            episodeTitle = null,
-                            progress = 3, // meets MIN_PROGRESS_THRESHOLD to avoid filter
-                            positionSeconds = 0L, // next episode: no resume position yet
-                            durationSeconds = 0L  // next episode: unknown duration
-                        )
+                        val episodesInCurrentSeason = _uiState.value.seasonEpisodes
+                        val currentEpIdx = episodesInCurrentSeason.indexOfFirst { it.episodeNumber == cwEpisode }
+                        val nextEpInSeason = if (currentEpIdx >= 0 && currentEpIdx + 1 < episodesInCurrentSeason.size) {
+                            episodesInCurrentSeason[currentEpIdx + 1].episodeNumber
+                        } else {
+                            episodesInCurrentSeason.firstOrNull { it.episodeNumber > cwEpisode }?.episodeNumber
+                        }
+
+                        if (nextEpInSeason != null) {
+                            // Próximo episódio na mesma temporada (respeitando gaps)
+                            traktRepository.saveLocalContinueWatching(
+                                mediaType = currentMediaType,
+                                tmdbId = currentMediaId,
+                                title = currentItemTitle.ifEmpty { currentTitle },
+                                posterPath = currentPoster,
+                                backdropPath = currentBackdrop,
+                                season = cwSeason,
+                                episode = nextEpInSeason,
+                                episodeTitle = null,
+                                progress = 3, // meets MIN_PROGRESS_THRESHOLD to avoid filter
+                                positionSeconds = 0L, // next episode: no resume position yet
+                                durationSeconds = 0L  // next episode: unknown duration
+                            )
+                            fenixRepository.removeConcludedSeries(currentMediaId)
+                        } else {
+                            // Era o último episódio da temporada atual. Verifica se há próxima temporada no Bot
+                            val fenixSeasons = runCatching { fenixRepository.getSeasons(currentMediaId) }.getOrNull().orEmpty()
+                            val nextSeason = fenixSeasons.filter { it.seasonNumber > cwSeason }.minByOrNull { it.seasonNumber }
+                            if (nextSeason != null && nextSeason.episodeCount > 0) {
+                                val firstEp = nextSeason.episodeNumbers.firstOrNull() ?: 1
+                                traktRepository.saveLocalContinueWatching(
+                                    mediaType = currentMediaType,
+                                    tmdbId = currentMediaId,
+                                    title = currentItemTitle.ifEmpty { currentTitle },
+                                    posterPath = currentPoster,
+                                    backdropPath = currentBackdrop,
+                                    season = nextSeason.seasonNumber,
+                                    episode = firstEp,
+                                    episodeTitle = null,
+                                    progress = 3,
+                                    positionSeconds = 0L,
+                                    durationSeconds = 0L
+                                )
+                                fenixRepository.removeConcludedSeries(currentMediaId)
+                            } else {
+                                // Série concluída! Não adiciona episódio fantasma e registra para monitoramento em lote
+                                traktRepository.removeFromContinueWatchingCache(currentMediaId, cwSeason, cwEpisode)
+                                fenixRepository.recordConcludedSeries(currentMediaId, cwSeason, cwEpisode)
+                            }
+                        }
                     } catch (_: Exception) {
                         // Best-effort: don't let CW save failure affect playback
                     }
@@ -4653,5 +4774,157 @@ class PlayerViewModel @Inject constructor(
                 Log.d(TAG, "Telegram proxy is ready!")
             }
         }
+    }
+
+    fun setAutoSkipIntro(enabled: Boolean) {
+        _uiState.value = _uiState.value.copy(autoSkipIntro = enabled)
+        viewModelScope.launch {
+            context.settingsDataStore.edit { prefs ->
+                prefs[profileManager.profileBooleanKey("auto_skip_intro")] = enabled
+            }
+        }
+    }
+
+    fun setAutoSkipOutro(enabled: Boolean) {
+        _uiState.value = _uiState.value.copy(autoSkipOutro = enabled)
+        viewModelScope.launch {
+            context.settingsDataStore.edit { prefs ->
+                prefs[profileManager.profileBooleanKey("auto_skip_outro")] = enabled
+            }
+        }
+    }
+
+    fun setAudioDelayMs(delayMs: Long) {
+        _uiState.value = _uiState.value.copy(audioDelayMs = delayMs)
+        viewModelScope.launch {
+            context.settingsDataStore.edit { prefs ->
+                prefs[profileManager.profileLongKey("audio_delay_ms")] = delayMs
+            }
+        }
+    }
+
+    fun setAudioNormalization(enabled: Boolean) {
+        _uiState.value = _uiState.value.copy(audioNormalization = enabled)
+        viewModelScope.launch {
+            context.settingsDataStore.edit { prefs ->
+                prefs[profileManager.profileBooleanKey("audio_normalization")] = enabled
+            }
+        }
+    }
+
+    fun setAutoPlayNext(enabled: Boolean) {
+        _uiState.value = _uiState.value.copy(autoPlayNext = enabled)
+        viewModelScope.launch {
+            context.settingsDataStore.edit { prefs ->
+                prefs[autoPlayNextKey()] = enabled
+            }
+        }
+    }
+
+    fun setSubtitleSizePct(pct: Int) {
+        _uiState.value = _uiState.value.copy(subtitleSizePct = pct)
+    }
+
+    fun setSubtitleVerticalPct(pct: Int) {
+        _uiState.value = _uiState.value.copy(subtitleVerticalPct = pct)
+    }
+
+    fun setVolumeBoostDb(boostDb: Int) {
+        val clamped = boostDb.coerceIn(0, 15)
+        _uiState.value = _uiState.value.copy(volumeBoostDb = clamped)
+        viewModelScope.launch {
+            context.settingsDataStore.edit { prefs ->
+                prefs[profileManager.profileStringKey("volume_boost_db")] = clamped.toString()
+            }
+        }
+    }
+
+    fun setSubtitleColorPref(color: String) {
+        _uiState.value = _uiState.value.copy(subtitleColor = color)
+        viewModelScope.launch {
+            context.settingsDataStore.edit { prefs ->
+                prefs[profileManager.profileStringKey("subtitle_color")] = color
+            }
+        }
+    }
+
+    fun setSubtitleOffsetPref(offset: String) {
+        _uiState.value = _uiState.value.copy(subtitleOffset = offset)
+        viewModelScope.launch {
+            context.settingsDataStore.edit { prefs ->
+                prefs[profileManager.profileStringKey("subtitle_offset")] = offset
+            }
+        }
+    }
+
+    fun setSubtitleStylePref(style: String) {
+        _uiState.value = _uiState.value.copy(subtitleStyle = style)
+        viewModelScope.launch {
+            context.settingsDataStore.edit { prefs ->
+                prefs[profileManager.profileStringKey("subtitle_style")] = style
+            }
+        }
+    }
+
+    fun setSubtitleFontPref(font: String) {
+        _uiState.value = _uiState.value.copy(subtitleFont = font)
+        viewModelScope.launch {
+            context.settingsDataStore.edit { prefs ->
+                prefs[profileManager.profileStringKey("subtitle_font")] = font
+            }
+        }
+    }
+
+    fun setSubtitleStylizedPref(stylized: Boolean) {
+        _uiState.value = _uiState.value.copy(subtitleStylized = stylized)
+        viewModelScope.launch {
+            context.settingsDataStore.edit { prefs ->
+                prefs[profileManager.profileBooleanKey("subtitle_stylized")] = stylized
+            }
+        }
+    }
+
+    fun setSubtitlePreloadEnabled(enabled: Boolean) {
+        subtitlePreloadEnabled = enabled
+        _uiState.value = _uiState.value.copy(subtitlePreloadEnabled = enabled)
+        viewModelScope.launch {
+            context.settingsDataStore.edit { prefs ->
+                prefs[subtitlePreloadKey] = enabled
+            }
+        }
+    }
+
+    fun setFilterSubtitlesByLanguage(enabled: Boolean) {
+        _uiState.value = _uiState.value.copy(filterSubtitlesByLanguage = enabled)
+        viewModelScope.launch {
+            context.settingsDataStore.edit { prefs ->
+                prefs[profileManager.profileBooleanKey("filter_subtitles_by_language")] = enabled
+            }
+        }
+    }
+
+    fun setSubtitleRemoveHearingImpaired(enabled: Boolean) {
+        _uiState.value = _uiState.value.copy(subtitleRemoveHearingImpaired = enabled)
+        viewModelScope.launch {
+            context.settingsDataStore.edit { prefs ->
+                prefs[aiRemoveHearingImpairedKey] = enabled
+            }
+        }
+    }
+
+    fun reloadStreams() {
+        loadMedia(
+            mediaType = currentMediaType,
+            mediaId = currentMediaId,
+            seasonNumber = currentSeason,
+            episodeNumber = currentEpisode,
+            providedImdbId = currentImdbId,
+            providedStreamUrl = null,
+            preferredAddonId = currentPreferredAddonId,
+            preferredSourceName = currentPreferredSourceName,
+            preferredBingeGroup = currentPreferredBingeGroup,
+            preferredDescription = currentPreferredDescription,
+            startPositionMs = null
+        )
     }
 }

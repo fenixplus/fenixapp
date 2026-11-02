@@ -11,14 +11,15 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -29,7 +30,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -53,7 +56,8 @@ fun PinEntryDialog(
     onPinConfirmed: (String) -> Unit,
     onDismiss: () -> Unit,
     isSetup: Boolean = false,
-    pinError: String = ""
+    pinError: String = "",
+    setupHint: String? = null
 ) {
     var pinInput by remember { mutableStateOf("") }
     var confirmPin by remember { mutableStateOf("") }
@@ -65,6 +69,9 @@ fun PinEntryDialog(
     LaunchedEffect(pinError) {
         errorMessage = pinError
     }
+
+    val configuration = LocalConfiguration.current
+    val maxDialogHeight = (configuration.screenHeightDp - 32).dp
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -78,28 +85,30 @@ fun PinEntryDialog(
         ) {
             Column(
                 modifier = Modifier
+                    .widthIn(max = 320.dp)
+                    .heightIn(max = maxDialogHeight)
                     .clip(RoundedCornerShape(16.dp))
                     .background(Color(0xFF141414))
-                    .padding(40.dp)
-                    .width(300.dp),
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 24.dp, vertical = 20.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(16.dp)
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 // Icon + Title
                 Icon(
                     imageVector = Icons.Default.Lock,
                     contentDescription = stringResource(R.string.profile_pin_entry_cd),
                     tint = Color.White,
-                    modifier = Modifier.size(32.dp)
+                    modifier = Modifier.size(28.dp)
                 )
 
                 Text(
                     text = when {
-                        isSetup && !isConfirmingSetup -> stringResource(R.string.set_profile_pin)
+                        isSetup && !isConfirmingSetup -> title
                         isSetup && isConfirmingSetup -> stringResource(R.string.profile_confirm_pin)
                         else -> title
                     },
-                    fontSize = 18.sp,
+                    fontSize = 17.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = Color.White,
                     textAlign = TextAlign.Center
@@ -107,11 +116,11 @@ fun PinEntryDialog(
 
                 Text(
                     text = when {
-                        isSetup && !isConfirmingSetup -> stringResource(R.string.profile_pin_setup_hint)
+                        isSetup && !isConfirmingSetup -> setupHint ?: stringResource(R.string.profile_pin_setup_hint)
                         isSetup && isConfirmingSetup -> stringResource(R.string.profile_pin_reenter)
                         else -> stringResource(R.string.enter_pin_to_unlock)
                     },
-                    fontSize = 12.sp,
+                    fontSize = 11.sp,
                     color = Color(0xFFB0B0B0),
                     textAlign = TextAlign.Center
                 )
@@ -120,15 +129,16 @@ fun PinEntryDialog(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(vertical = 16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        .padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.Center,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     repeat(5) { index ->
                         val currentPin = if (isSetup && isConfirmingSetup) confirmPin else pinInput
                         Box(
                             modifier = Modifier
-                                .size(40.dp)
+                                .padding(horizontal = 4.dp)
+                                .size(36.dp)
                                 .clip(RoundedCornerShape(8.dp))
                                 .background(Color(0xFF2A2A2A))
                                 .border(
@@ -141,7 +151,7 @@ fun PinEntryDialog(
                             if (index < currentPin.length) {
                                 Text(
                                     text = "•",
-                                    fontSize = 24.sp,
+                                    fontSize = 22.sp,
                                     color = Color(0xFF4CAF50),
                                     fontWeight = FontWeight.Bold
                                 )
@@ -152,12 +162,12 @@ fun PinEntryDialog(
 
                 // Numeric Keypad
                 Column(
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     for (row in 0..2) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             for (col in 0..2) {
                                 val num = row * 3 + col + 1
@@ -165,7 +175,7 @@ fun PinEntryDialog(
                                     label = num.toString(),
                                     modifier = Modifier
                                         .weight(1f)
-                                        .height(48.dp),
+                                        .height(38.dp),
                                     onClick = {
                                         val currentPin = if (isSetup && isConfirmingSetup) confirmPin else pinInput
                                         if (currentPin.length < 5) {
@@ -186,13 +196,13 @@ fun PinEntryDialog(
                     // Bottom row: 0, Clear, Backspace
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         PinKeyButton(
                             label = "0",
                             modifier = Modifier
                                 .weight(1f)
-                                .height(48.dp),
+                                .height(38.dp),
                             onClick = {
                                 val currentPin = if (isSetup && isConfirmingSetup) confirmPin else pinInput
                                 if (currentPin.length < 5) {
@@ -211,7 +221,7 @@ fun PinEntryDialog(
                             label = stringResource(R.string.profile_clear),
                             modifier = Modifier
                                 .weight(1f)
-                                .height(48.dp),
+                                .height(38.dp),
                             onClick = {
                                 if (isSetup && isConfirmingSetup) {
                                     confirmPin = ""
@@ -226,7 +236,7 @@ fun PinEntryDialog(
                             label = "←",
                             modifier = Modifier
                                 .weight(1f)
-                                .height(48.dp),
+                                .height(38.dp),
                             onClick = {
                                 val currentPin = if (isSetup && isConfirmingSetup) confirmPin else pinInput
                                 if (currentPin.isNotEmpty()) {
@@ -247,7 +257,7 @@ fun PinEntryDialog(
                 if (errorMessage.isNotEmpty()) {
                     Text(
                         text = errorMessage,
-                        fontSize = 12.sp,
+                        fontSize = 11.sp,
                         color = Color(0xFFFF6B6B),
                         textAlign = TextAlign.Center
                     )
@@ -256,7 +266,7 @@ fun PinEntryDialog(
                 // Buttons
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     PinActionButton(
                         label = stringResource(R.string.cancel),
@@ -264,7 +274,7 @@ fun PinEntryDialog(
                         containerColor = Color(0xFF2A2A2A),
                         modifier = Modifier
                             .weight(1f)
-                            .height(44.dp)
+                            .height(38.dp)
                     )
 
                     PinActionButton(
@@ -292,7 +302,7 @@ fun PinEntryDialog(
                         containerColor = Color(0xFF4CAF50),
                         modifier = Modifier
                             .weight(1f)
-                            .height(44.dp)
+                            .height(38.dp)
                     )
                 }
             }
@@ -309,12 +319,13 @@ private fun PinActionButton(
     modifier: Modifier = Modifier
 ) {
     val isTouchDevice = LocalDeviceType.current.isTouchDevice()
+    var isFocused by remember { mutableStateOf(false) }
     val content: @Composable () -> Unit = {
         Box(
             contentAlignment = Alignment.Center,
             modifier = Modifier.fillMaxSize()
         ) {
-            Text(label, color = Color.White, fontWeight = FontWeight.SemiBold)
+            Text(label, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
         }
     }
 
@@ -330,8 +341,18 @@ private fun PinActionButton(
     } else {
         Surface(
             onClick = onClick,
-            colors = ClickableSurfaceDefaults.colors(containerColor = containerColor),
-            modifier = modifier
+            shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(8.dp)),
+            colors = ClickableSurfaceDefaults.colors(
+                containerColor = containerColor,
+                focusedContainerColor = containerColor
+            ),
+            border = ClickableSurfaceDefaults.border(
+                focusedBorder = androidx.tv.material3.Border(
+                    border = androidx.compose.foundation.BorderStroke(2.dp, Color.White),
+                    shape = RoundedCornerShape(8.dp)
+                )
+            ),
+            modifier = modifier.onFocusChanged { isFocused = it.isFocused }
         ) {
             content()
         }
@@ -346,6 +367,7 @@ private fun PinKeyButton(
     onClick: () -> Unit
 ) {
     val isTouchDevice = LocalDeviceType.current.isTouchDevice()
+    var isFocused by remember { mutableStateOf(false) }
     val content: @Composable () -> Unit = {
         Box(
             contentAlignment = Alignment.Center,
@@ -353,9 +375,9 @@ private fun PinKeyButton(
         ) {
             Text(
                 text = label,
-                color = Color.White,
+                color = if (isFocused) Color.White else Color.White.copy(alpha = 0.9f),
                 fontWeight = FontWeight.SemiBold,
-                fontSize = 14.sp
+                fontSize = 13.sp
             )
         }
     }
@@ -371,10 +393,18 @@ private fun PinKeyButton(
     } else {
         Surface(
             onClick = onClick,
+            shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(8.dp)),
             colors = ClickableSurfaceDefaults.colors(
-                containerColor = Color(0xFF2A2A2A)
+                containerColor = Color(0xFF2A2A2A),
+                focusedContainerColor = Color(0xFF404040)
             ),
-            modifier = modifier
+            border = ClickableSurfaceDefaults.border(
+                focusedBorder = androidx.tv.material3.Border(
+                    border = androidx.compose.foundation.BorderStroke(2.dp, Color.White),
+                    shape = RoundedCornerShape(8.dp)
+                )
+            ),
+            modifier = modifier.onFocusChanged { isFocused = it.isFocused }
         ) {
             content()
         }

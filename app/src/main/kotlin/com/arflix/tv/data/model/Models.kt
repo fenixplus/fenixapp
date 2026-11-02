@@ -16,6 +16,7 @@ data class MediaItem(
     val year: String = "",
     val releaseDate: String? = null,
     val rating: String = "",
+    val contentRating: String? = null,
     val duration: String = "",
     val imdbRating: String = "",
     val tmdbRating: String = "",

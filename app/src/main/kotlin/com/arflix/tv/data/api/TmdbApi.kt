@@ -4,6 +4,7 @@ import com.google.gson.annotations.SerializedName
 import retrofit2.http.GET
 import retrofit2.http.Path
 import retrofit2.http.Query
+import retrofit2.http.QueryMap
 
 /**
  * TMDB API interface
@@ -36,8 +37,15 @@ interface TmdbApi {
         @Query("first_air_date_year") year: Int? = null,
         @Query("vote_count.gte") minVoteCount: Int? = null,
         @Query("with_keywords") keywords: String? = null,
+        @Query("without_genres") withoutGenres: String? = null,
         @Query("air_date.gte") airDateGte: String? = null,
         @Query("air_date.lte") airDateLte: String? = null,
+        @Query("first_air_date.gte") firstAirDateGte: String? = null,
+        @Query("first_air_date.lte") firstAirDateLte: String? = null,
+        @Query("vote_average.gte") minVoteAverage: Double? = null,
+        @Query("vote_average.lte") maxVoteAverage: Double? = null,
+        @Query("certification_country") certificationCountry: String? = null,
+        @Query("certification.lte") certificationLte: String? = null,
         @Query("language") language: String? = null,
         @Query("page") page: Int = 1
     ): TmdbListResponse
@@ -46,14 +54,21 @@ interface TmdbApi {
     suspend fun discoverMovies(
         @Query("api_key") apiKey: String,
         @Query("with_genres") genres: String? = null,
+        @Query("without_genres") withoutGenres: String? = null,
         @Query("with_crew") crew: String? = null,
         @Query("sort_by") sortBy: String = "popularity.desc",
         @Query("vote_count.gte") minVoteCount: Int? = null,
+        @Query("vote_average.gte") minVoteAverage: Double? = null,
+        @Query("vote_average.lte") maxVoteAverage: Double? = null,
+        @Query("certification_country") certificationCountry: String? = null,
+        @Query("certification.lte") certificationLte: String? = null,
         @Query("with_keywords") keywords: String? = null,
         @Query("with_original_language") originalLanguage: String? = null,
         @Query("primary_release_year") year: Int? = null,
         @Query("release_date.gte") releaseDateGte: String? = null,
         @Query("release_date.lte") releaseDateLte: String? = null,
+        @Query("primary_release_date.gte") primaryReleaseDateGte: String? = null,
+        @Query("primary_release_date.lte") primaryReleaseDateLte: String? = null,
         @Query("with_watch_providers") watchProviders: Int? = null,
         @Query("watch_region") watchRegion: String? = null,
         @Query("language") language: String? = null,
@@ -64,6 +79,7 @@ interface TmdbApi {
     suspend fun getMovieDetails(
         @Path("movie_id") movieId: Int,
         @Query("api_key") apiKey: String,
+        @Query("append_to_response") appendToResponse: String = "release_dates",
         @Query("language") language: String? = null
     ): TmdbMovieDetails
 
@@ -71,8 +87,22 @@ interface TmdbApi {
     suspend fun getTvDetails(
         @Path("tv_id") tvId: Int,
         @Query("api_key") apiKey: String,
+        @Query("append_to_response") appendToResponse: String = "content_ratings",
         @Query("language") language: String? = null
     ): TmdbTvDetails
+
+    /** Certifications only — the kids filter checks many titles and needs nothing else. */
+    @GET("movie/{movie_id}/release_dates")
+    suspend fun getMovieReleaseDates(
+        @Path("movie_id") movieId: Int,
+        @Query("api_key") apiKey: String
+    ): TmdbReleaseDatesResponse
+
+    @GET("tv/{tv_id}/content_ratings")
+    suspend fun getTvContentRatings(
+        @Path("tv_id") tvId: Int,
+        @Query("api_key") apiKey: String
+    ): TmdbContentRatingsResponse
 
     @GET("tv/{tv_id}/season/{season_number}")
     suspend fun getTvSeason(
@@ -215,9 +245,63 @@ interface TmdbApi {
         @Query("api_key") apiKey: String,
         @Query("language") language: String? = null
     ): TmdbCollectionResponse
+
+    /**
+     * Free-form discover query used by imported collections, whose filters are
+     * raw TMDB query keys (with_companies, with_networks, *_date.gte, ...).
+     */
+    @GET("discover/{media_type}")
+    suspend fun discoverWithParams(
+        @Path("media_type") mediaType: String,
+        @Query("api_key") apiKey: String,
+        @QueryMap params: Map<String, String>,
+        @Query("sort_by") sortBy: String = "popularity.desc",
+        @Query("language") language: String? = null,
+        @Query("page") page: Int = 1
+    ): TmdbListResponse
+
+    /** Public TMDB v3 list; items keep the list's own order and carry a media_type. */
+    @GET("list/{list_id}")
+    suspend fun getPublicList(
+        @Path("list_id") listId: Int,
+        @Query("api_key") apiKey: String,
+        @Query("language") language: String? = null,
+        @Query("page") page: Int = 1
+    ): TmdbPublicListResponse
 }
 
 // Response data classes
+
+data class TmdbPublicListResponse(
+    val page: Int = 1,
+    val items: List<TmdbPublicListItem> = emptyList(),
+    @SerializedName("total_pages") val totalPages: Int = 1
+)
+
+data class TmdbPublicListItem(
+    val id: Int = 0,
+    @SerializedName("media_type") val mediaType: String? = null,
+    val title: String? = null,
+    val name: String? = null,
+    @SerializedName("original_title") val originalTitle: String? = null,
+    @SerializedName("original_name") val originalName: String? = null,
+    val overview: String? = null,
+    @SerializedName("release_date") val releaseDate: String? = null,
+    @SerializedName("first_air_date") val firstAirDate: String? = null,
+    @SerializedName("poster_path") val posterPath: String? = null,
+    @SerializedName("backdrop_path") val backdropPath: String? = null,
+    @SerializedName("vote_average") val voteAverage: Float = 0f,
+    @SerializedName("genre_ids") val genreIds: List<Int> = emptyList(),
+    @SerializedName("original_language") val originalLanguage: String? = null
+) {
+    fun asMediaItem() = TmdbMediaItem(
+        id = id, mediaType = mediaType, title = title, name = name,
+        originalTitle = originalTitle, originalName = originalName, overview = overview,
+        releaseDate = releaseDate, firstAirDate = firstAirDate,
+        posterPath = posterPath, backdropPath = backdropPath, voteAverage = voteAverage,
+        genreIds = genreIds, originalLanguage = originalLanguage
+    )
+}
 
 data class TmdbListResponse(
     val page: Int = 1,
@@ -263,7 +347,8 @@ data class TmdbMovieDetails(
     val genres: List<TmdbGenre> = emptyList(),
     val status: String? = null,
     val adult: Boolean = false,
-    @SerializedName("belongs_to_collection") val belongsToCollection: TmdbCollectionRef? = null
+    @SerializedName("belongs_to_collection") val belongsToCollection: TmdbCollectionRef? = null,
+    @SerializedName("release_dates") val releaseDates: TmdbReleaseDatesResponse? = null
 )
 
 /** Reference to a TMDB collection (franchise) returned inside movie/TV details. */
@@ -289,7 +374,35 @@ data class TmdbTvDetails(
     @SerializedName("episode_run_time") val episodeRunTime: List<Int> = emptyList(),
     val status: String? = null,
     val genres: List<TmdbGenre> = emptyList(),
-    val seasons: List<TmdbTvSeason> = emptyList()
+    val seasons: List<TmdbTvSeason> = emptyList(),
+    @SerializedName("content_ratings") val contentRatings: TmdbContentRatingsResponse? = null
+)
+
+/**
+ * Age certifications for a movie, appended to /movie/{id} as `release_dates`.
+ * A country can list several certifications (theatrical, TV, streaming), so the
+ * per-country entry carries a list.
+ */
+data class TmdbReleaseDatesResponse(val results: List<TmdbReleaseDatesResult> = emptyList())
+data class TmdbReleaseDatesResult(
+    @SerializedName("iso_3166_1") val iso31661: String = "",
+    @SerializedName("release_dates") val releaseDates: List<TmdbReleaseDate> = emptyList()
+)
+/** `type` 3 is the theatrical release. Unknown types sort last, see ContentRating. */
+data class TmdbReleaseDate(
+    val certification: String? = null,
+    val type: Int = Int.MAX_VALUE,
+    @SerializedName("release_date") val releaseDate: String? = null
+)
+
+/**
+ * Age certifications for a TV show, appended to /tv/{id} as `content_ratings`.
+ * Unlike movies there is exactly one value per country.
+ */
+data class TmdbContentRatingsResponse(val results: List<TmdbContentRatingResult> = emptyList())
+data class TmdbContentRatingResult(
+    @SerializedName("iso_3166_1") val iso31661: String = "",
+    val rating: String? = null
 )
 
 data class TmdbSeasonDetails(

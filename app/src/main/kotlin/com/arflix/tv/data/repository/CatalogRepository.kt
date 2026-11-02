@@ -70,7 +70,7 @@ class CatalogRepository @Inject constructor(
     }
 
     private val gson = Gson()
-    private fun catalogsKey(profileId: String) = stringPreferencesKey("profile_${profileId}_catalogs_v1")
+    private fun catalogsKey(profileId: String) = stringPreferencesKey("profile_${profileId}_catalogs_v2")
     private fun hiddenPreinstalledKey(profileId: String) = stringPreferencesKey("profile_${profileId}_hidden_preinstalled_catalogs_v2")
     private fun hiddenAddonKey(profileId: String) = stringPreferencesKey("profile_${profileId}_hidden_addon_catalogs_v1")
     private fun hiddenHomeServerKey(profileId: String) = stringPreferencesKey("profile_${profileId}_hidden_home_server_catalogs_v1")

@@ -32,13 +32,32 @@ class ProfileRepository @Inject constructor(
     companion object {
         private val PROFILES_KEY = stringPreferencesKey("profiles")
         private val ACTIVE_PROFILE_KEY = stringPreferencesKey("active_profile_id")
+        private val PARENT_PIN_KEY = stringPreferencesKey("parent_pin")
+    }
+
+    /**
+     * Flow of the global parental PIN
+     */
+    val parentPin: Flow<String?> = context.profilesDataStore.data.map { prefs ->
+        val globalPin = prefs[PARENT_PIN_KEY]
+        if (!globalPin.isNullOrEmpty()) return@map globalPin
+        decodeProfiles(prefs[PROFILES_KEY]).firstOrNull { it.isKidsProfile && !it.parentPin.isNullOrEmpty() }?.parentPin
     }
 
     /**
      * Flow of all profiles
      */
     val profiles: Flow<List<Profile>> = context.profilesDataStore.data.map { prefs ->
-        decodeProfiles(prefs[PROFILES_KEY])
+        val globalPin = prefs[PARENT_PIN_KEY]
+        val rawProfiles = decodeProfiles(prefs[PROFILES_KEY])
+        val effectiveGlobalPin = globalPin ?: rawProfiles.firstOrNull { it.isKidsProfile && !it.parentPin.isNullOrEmpty() }?.parentPin
+        rawProfiles.map { profile ->
+            if (profile.isKidsProfile) {
+                profile.copy(parentPin = effectiveGlobalPin)
+            } else {
+                profile
+            }
+        }
     }
 
     /**
@@ -53,7 +72,11 @@ class ProfileRepository @Inject constructor(
      */
     val activeProfile: Flow<Profile?> = context.profilesDataStore.data.map { prefs ->
         val activeId = prefs[ACTIVE_PROFILE_KEY] ?: return@map null
-        decodeProfiles(prefs[PROFILES_KEY]).find { it.id == activeId }
+        val globalPin = prefs[PARENT_PIN_KEY]
+        val rawProfiles = decodeProfiles(prefs[PROFILES_KEY])
+        val effectiveGlobalPin = globalPin ?: rawProfiles.firstOrNull { it.isKidsProfile && !it.parentPin.isNullOrEmpty() }?.parentPin
+        val found = rawProfiles.find { it.id == activeId } ?: return@map null
+        if (found.isKidsProfile) found.copy(parentPin = effectiveGlobalPin) else found
     }
 
     /**
@@ -77,17 +100,81 @@ class ProfileRepository @Inject constructor(
     suspend fun hasProfiles(): Boolean = getProfiles().isNotEmpty()
 
     /**
+     * Get global parental PIN (one-shot)
+     */
+    suspend fun getParentPin(): String? {
+        val prefs = context.profilesDataStore.data.first()
+        val global = prefs[PARENT_PIN_KEY]
+        if (!global.isNullOrEmpty()) return global
+        val legacy = decodeProfiles(prefs[PROFILES_KEY]).firstOrNull { it.isKidsProfile && !it.parentPin.isNullOrEmpty() }?.parentPin
+        if (!legacy.isNullOrEmpty()) {
+            context.profilesDataStore.edit { it[PARENT_PIN_KEY] = legacy }
+            return legacy
+        }
+        return null
+    }
+
+    /**
+     * Set global parental PIN
+     */
+    suspend fun setParentPin(pin: String?) {
+        context.profilesDataStore.edit { prefs ->
+            if (pin.isNullOrEmpty()) {
+                prefs.remove(PARENT_PIN_KEY)
+            } else {
+                prefs[PARENT_PIN_KEY] = pin
+            }
+            val currentList = decodeProfiles(prefs[PROFILES_KEY]).toMutableList()
+            var changed = false
+            for (i in currentList.indices) {
+                if (currentList[i].isKidsProfile) {
+                    currentList[i] = currentList[i].copy(parentPin = pin)
+                    changed = true
+                }
+            }
+            if (changed) {
+                prefs[PROFILES_KEY] = encodeProfiles(currentList)
+            }
+        }
+        invalidationBus.markDirty(CloudSyncScope.PROFILES, reason = "set parent pin")
+        pushProfilesStateToCloud()
+    }
+
+    /**
+     * Check if at least one kids profile exists
+     */
+    suspend fun hasKidsProfile(): Boolean = getProfiles().any { it.isKidsProfile }
+
+    /**
      * Create a new profile
      */
-    suspend fun createProfile(name: String, avatarColor: Long, avatarId: Int = 0, isKidsProfile: Boolean = false): Profile {
+    suspend fun createProfile(
+        name: String,
+        avatarColor: Long,
+        avatarId: Int = 0,
+        isKidsProfile: Boolean = false,
+        kidsAgeLevel: String? = null,
+        parentPin: String? = null
+    ): Profile {
+        val effectiveParentPin = if (isKidsProfile) {
+            parentPin ?: getParentPin()
+        } else {
+            null
+        }
         val profile = Profile(
             name = name,
             avatarColor = avatarColor,
             avatarId = avatarId,
-            isKidsProfile = isKidsProfile
+            isKidsProfile = isKidsProfile,
+            kidsAgeLevel = kidsAgeLevel,
+            parentPin = effectiveParentPin,
+            updatedAt = System.currentTimeMillis()
         )
 
         context.profilesDataStore.edit { prefs ->
+            if (isKidsProfile && !effectiveParentPin.isNullOrEmpty() && prefs[PARENT_PIN_KEY].isNullOrEmpty()) {
+                prefs[PARENT_PIN_KEY] = effectiveParentPin
+            }
             val currentList = decodeProfiles(prefs[PROFILES_KEY]).toMutableList()
             currentList.add(profile)
             prefs[PROFILES_KEY] = encodeProfiles(currentList)
@@ -185,7 +272,11 @@ class ProfileRepository @Inject constructor(
             }
         }
 
+        val cloudParentPin = profiles.firstOrNull { it.isKidsProfile && !it.parentPin.isNullOrEmpty() }?.parentPin
         context.profilesDataStore.edit { prefs ->
+            if (!cloudParentPin.isNullOrEmpty() && prefs[PARENT_PIN_KEY].isNullOrEmpty()) {
+                prefs[PARENT_PIN_KEY] = cloudParentPin
+            }
             prefs[PROFILES_KEY] = gson.toJson(mergedProfiles)
             if (!activeProfileId.isNullOrBlank() && mergedProfiles.any { it.id == activeProfileId }) {
                 prefs[ACTIVE_PROFILE_KEY] = activeProfileId

@@ -20,6 +20,7 @@ import com.arflix.tv.data.api.TmdbApi
 import com.arflix.tv.data.api.TraktComment
 import com.arflix.tv.data.repository.CloudSyncRepository
 import com.arflix.tv.data.repository.HomeServerRepository
+import com.arflix.tv.data.repository.KidsContentFilter
 import com.arflix.tv.data.repository.LauncherContinueWatchingRepository
 import com.arflix.tv.data.repository.MediaRepository
 import com.arflix.tv.data.repository.ProfileManager
@@ -204,7 +205,8 @@ class DetailsViewModel @Inject constructor(
     private val cloudSyncRepository: CloudSyncRepository,
     private val launcherContinueWatchingRepository: LauncherContinueWatchingRepository,
     private val fenixRepository: com.arflix.tv.data.telegram.FenixRepository,
-    private val telegramRepository: TelegramRepository
+    private val telegramRepository: TelegramRepository,
+    private val kidsContentFilter: KidsContentFilter
 ) : ViewModel() {
 
     init {
@@ -343,6 +345,7 @@ class DetailsViewModel @Inject constructor(
     }
 
     fun loadDetails(mediaType: MediaType, mediaId: Int, initialSeason: Int? = null, initialEpisode: Int? = null) {
+        fenixRepository.cancelBackgroundBatchCheck()
         // If same media is already loaded, don't reset everything.
         // Just rely on refreshAfterPlayerReturn() which is called from Screen.ON_RESUME
         if (currentMediaId == mediaId && currentMediaType == mediaType && _uiState.value.item != null) {
@@ -373,6 +376,17 @@ class DetailsViewModel @Inject constructor(
 
         viewModelScope.launch {
             try {
+                if (kidsContentFilter.state.value.isActive) {
+                    val allowed = kidsContentFilter.isAllowed(mediaType, mediaId)
+                    if (!allowed) {
+                        _uiState.value = DetailsUiState(
+                            isLoading = false,
+                            error = context.getString(R.string.kids_content_blocked)
+                        )
+                        return@launch
+                    }
+                }
+
                 val prefs = context.settingsDataStore.data.first()
                 val autoPlaySingleSource = prefs[autoPlaySingleSourceKey()] ?: true
                 val autoPlayMinQuality = normalizeAutoPlayMinQuality(prefs[autoPlayMinQualityKey()])
@@ -650,7 +664,11 @@ class DetailsViewModel @Inject constructor(
                     delay(320L)
                     val similar = runCatching { mediaRepository.getSimilar(mediaType, mediaId) }.getOrNull()
                     if (!similar.isNullOrEmpty()) {
-                        val filteredSimilar = filterFenixItems(similar)
+                        val filteredSimilar = if (kidsContentFilter.state.value.isActive) {
+                            kidsContentFilter.filter(filterFenixItems(similar))
+                        } else {
+                            filterFenixItems(similar)
+                        }
                         val logos = filteredSimilar.take(8).map { item ->
                             async {
                                 val key = "${item.mediaType}_${item.id}"
@@ -699,7 +717,11 @@ class DetailsViewModel @Inject constructor(
                             val items = runCatching {
                                 mediaRepository.getTmdbCollectionItems(collectionRef.id)
                             }.getOrNull() ?: emptyList()
-                            val filteredItems = filterFenixItems(items)
+                            val filteredItems = if (kidsContentFilter.state.value.isActive) {
+                                kidsContentFilter.filter(filterFenixItems(items))
+                            } else {
+                                filterFenixItems(items)
+                            }
                             updateState { state ->
                                 if (state.collectionId == collectionRef.id) {
                                     state.copy(collectionItems = filteredItems)
@@ -1383,7 +1405,11 @@ class DetailsViewModel @Inject constructor(
 
             try {
                 val person = mediaRepository.getPersonDetails(personId)
-                val filteredKnownFor = filterFenixItems(person.knownFor)
+                val filteredKnownFor = if (kidsContentFilter.state.value.isActive) {
+                    kidsContentFilter.filter(filterFenixItems(person.knownFor))
+                } else {
+                    filterFenixItems(person.knownFor)
+                }
                 _uiState.value = _uiState.value.copy(
                     isLoadingPerson = false,
                     selectedPerson = person.copy(knownFor = filteredKnownFor)
@@ -2811,7 +2837,8 @@ class DetailsViewModel @Inject constructor(
         // Se o Bot já enviou a contagem total de episódios, geramos a lista instantaneamente.
         // Isso evita múltiplas chamadas 'ae=' e lentidão em séries longas (ex: One Piece).
         if (fenixSeason.episodeCount > 0) {
-            val episodes = (1..fenixSeason.episodeCount).map { epNum ->
+            val episodeNums = if (fenixSeason.episodeNumbers.isNotEmpty()) fenixSeason.episodeNumbers else (1..fenixSeason.episodeCount).toList()
+            val episodes = episodeNums.map { epNum ->
                 Episode(
                     id = -1, // ID fictício; o player usará (tmdbId, season, episode) para buscar streams
                     episodeNumber = epNum,
@@ -2889,10 +2916,24 @@ class DetailsViewModel @Inject constructor(
         var updatedPlayFenixId = currentState.playFenixEpisodeId
         var updatedPlayLabel = currentState.playLabel
 
-        // If we don't have a play target yet, or we're syncing the "current" (resume) season
-        if (updatedPlayFenixId == null && (updatedPlaySeason == null || updatedPlaySeason == seasonNumber)) {
+        if (updatedPlaySeason == null || updatedPlaySeason == seasonNumber) {
             val target = if (updatedPlayEpisode != null) {
-                decorated.firstOrNull { it.episodeNumber == updatedPlayEpisode }
+                val matched = decorated.firstOrNull { it.episodeNumber == updatedPlayEpisode }
+                if (matched == null) {
+                    // O episódio salvo (ex: S1E9) NÃO existe no bot Fenix!
+                    // A série foi concluída no último episódio existente (ex: S1E8).
+                    val lastValidEp = decorated.lastOrNull()
+                    if (lastValidEp != null) {
+                        Log.w(TAG, "🧹 Fenix: Episódio fantasma $seasonNumber x $updatedPlayEpisode não existe no bot. Registrando série $mediaId como concluída em S${lastValidEp.seasonNumber} E${lastValidEp.episodeNumber}")
+                        fenixRepository.recordConcludedSeries(mediaId, lastValidEp.seasonNumber, lastValidEp.episodeNumber)
+                    }
+                    // Remove do Continuar Assistindo local
+                    traktRepository.removeFromContinueWatchingCache(mediaId, seasonNumber, updatedPlayEpisode)
+                    runCatching { launcherContinueWatchingRepository.refreshForCurrentProfile() }
+                    null
+                } else {
+                    matched
+                }
             } else {
                 decorated.firstOrNull { !it.isWatched } ?: decorated.firstOrNull()
             }
@@ -2902,6 +2943,13 @@ class DetailsViewModel @Inject constructor(
                 updatedPlayEpisode = target.episodeNumber
                 updatedPlayFenixId = target.id
                 updatedPlayLabel = context.getString(R.string.continue_season_episode, target.seasonNumber, target.episodeNumber)
+            } else {
+                // Se a temporada/série inteira foi concluída e não há próximo episódio a assistir
+                val firstEp = decorated.firstOrNull()
+                updatedPlaySeason = firstEp?.seasonNumber ?: 1
+                updatedPlayEpisode = firstEp?.episodeNumber ?: 1
+                updatedPlayFenixId = firstEp?.id
+                updatedPlayLabel = context.getString(R.string.play_start_s1e1)
             }
         }
 

@@ -2,16 +2,20 @@ package com.arflix.tv.ui.components
 
 import androidx.compose.foundation.border
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.ui.graphics.painter.Painter
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
@@ -92,6 +96,9 @@ fun MediaCard(
     onClick: () -> Unit = {},
     onLongClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
+    artworkPainter: Painter? = null,
+    artworkHeight: Dp? = null,
+    fillArtworkHeight: Boolean = false,
 ) {
     // If this is a placeholder card, show skeleton only
     if (item.isPlaceholder) {
@@ -121,6 +128,8 @@ fun MediaCard(
     // hovered tile animates its GIF. Regular media items keep the existing
     // behavior (landscape uses backdrop art, poster uses image).
     val isCollectionTile = item.status?.startsWith("collection:") == true
+    val isProviderLogo = item.status?.startsWith("collection:collection_service_") == true &&
+        item.image.startsWith("https://image.tmdb.org/")
     val baseImageUrl = if (isCollectionTile) {
         item.image.takeIf { it.isNotBlank() } ?: item.backdrop?.takeIf { it.isNotBlank() }
     } else if (isLandscape) {
@@ -192,7 +201,11 @@ fun MediaCard(
         ArvioFocusableSurface(
             modifier = Modifier
                 .fillMaxWidth()
-                .aspectRatio(aspectRatio),
+                .then(when {
+                    fillArtworkHeight -> Modifier.fillMaxHeight()
+                    artworkHeight != null -> Modifier.height(artworkHeight)
+                    else -> Modifier.aspectRatio(aspectRatio)
+                }),
             shape = shape,
             backgroundColor = ArvioSkin.colors.surface,
             outlineColor = ArvioSkin.colors.focusOutline,
@@ -212,25 +225,14 @@ fun MediaCard(
             },
         ) { _ ->
             Box(modifier = Modifier.fillMaxSize()) {
-                // Only render AsyncImage when we have a valid image URL.
-                // When imageRequest is null (no poster/backdrop from TMDB),
-                // render a branded gradient fallback with the title centered
-                // so the card conveys what it's for instead of showing as a
-                // blank rectangle that used to look broken.
-                if (imageRequest != null) {
-                    AsyncImage(
-                        model = imageRequest,
-                        contentDescription = item.title,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize(),
-                    )
-                } else {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(missingArtworkBrush),
-                        contentAlignment = Alignment.Center
-                    ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .then(if (isProviderLogo) Modifier.background(ArvioSkin.colors.surface)
+                              else Modifier.background(missingArtworkBrush)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (!isProviderLogo && (artworkPainter == null && imageRequest == null)) {
                         Text(
                             text = item.title,
                             style = ArvioSkin.typography.cardTitle,
@@ -240,6 +242,24 @@ fun MediaCard(
                             modifier = Modifier.padding(horizontal = 10.dp)
                         )
                     }
+                }
+                if (artworkPainter != null) {
+                    Image(
+                        painter = artworkPainter,
+                        contentDescription = item.title,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else if (imageRequest != null) {
+                    AsyncImage(
+                        model = imageRequest,
+                        contentDescription = item.title,
+                        contentScale = if (isProviderLogo) ContentScale.Fit else ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize().then(
+                            if (isProviderLogo) Modifier.padding(horizontal = width * 0.22f, vertical = 24.dp)
+                            else Modifier
+                        ),
+                    )
                 }
                 if (overlayBrush != null) {
                     Box(
@@ -758,3 +778,45 @@ fun FeaturedMediaCard(
         )
     }
 }
+
+/** The green tick on a watched title. Every card that shows a title draws this one. */
+@Composable
+fun WatchedBadge(modifier: Modifier = Modifier, size: Dp = 14.dp) {
+    Box(
+        modifier = modifier
+            .size(size)
+            .background(color = ArvioSkin.colors.watchedGreen.copy(alpha = 0.2f), shape = CircleShape)
+            .border(width = 1.dp, color = ArvioSkin.colors.watchedGreen, shape = CircleShape),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            imageVector = Icons.Default.Check,
+            contentDescription = null,
+            tint = ArvioSkin.colors.watchedGreen,
+            modifier = Modifier.size(size * (8f / 14f))
+        )
+    }
+}
+
+/** Remaining time for the Continue Watching badge, e.g. "25min left", or "25m" when [compact]. */
+@Composable
+internal fun timeRemainingBadgeLabel(totalMinutes: Int, compact: Boolean): String {
+    val hours = totalMinutes / 60
+    val minutes = totalMinutes % 60
+    return when {
+        hours == 0 -> stringResource(
+            if (compact) R.string.component_time_left_minutes_short else R.string.component_time_left_minutes,
+            minutes
+        )
+        minutes == 0 -> stringResource(
+            if (compact) R.string.component_time_left_hours_short else R.string.component_time_left_hours,
+            hours
+        )
+        else -> stringResource(
+            if (compact) R.string.component_time_left_hours_minutes_short else R.string.component_time_left_hours_minutes,
+            hours,
+            minutes
+        )
+    }
+}
+

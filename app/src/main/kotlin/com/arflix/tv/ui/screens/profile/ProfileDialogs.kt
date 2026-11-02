@@ -9,9 +9,12 @@ import android.widget.EditText
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.animation.core.animateFloatAsState
@@ -31,10 +34,17 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.FileUpload
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -71,6 +81,7 @@ import androidx.tv.material3.Icon
 import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
 import com.arflix.tv.R
+import com.arflix.tv.data.model.KidsAgeLevel
 import com.arflix.tv.data.model.Profile
 import com.arflix.tv.data.model.ProfileColors
 import com.arflix.tv.ui.components.AvatarIcon
@@ -98,12 +109,17 @@ fun AddProfileDialog(
     useCustomAvatarImage: Boolean = false,
     onAvatarImageSelected: (String) -> Unit = {},
     onRemoveAvatarImage: () -> Unit = {},
+    isKidsProfile: Boolean = false,
+    onKidsProfileChange: (Boolean) -> Unit = {},
+    kidsAgeLevel: KidsAgeLevel = KidsAgeLevel.DEFAULT,
+    onKidsAgeLevelChange: (KidsAgeLevel) -> Unit = {},
     onConfirm: () -> Unit,
     onDismiss: () -> Unit
 ) {
+    val isTouchDevice = LocalDeviceType.current.isTouchDevice()
     ProfileDialogContent(
         title = stringResource(R.string.add_profile),
-        autoFocusNameInput = true,
+        autoFocusNameInput = isTouchDevice,
         name = name,
         onNameChange = onNameChange,
         selectedColorIndex = selectedColorIndex,
@@ -114,6 +130,10 @@ fun AddProfileDialog(
         useCustomAvatarImage = useCustomAvatarImage,
         onAvatarImageSelected = onAvatarImageSelected,
         onRemoveAvatarImage = onRemoveAvatarImage,
+        isKidsProfile = isKidsProfile,
+        onKidsProfileChange = onKidsProfileChange,
+        kidsAgeLevel = kidsAgeLevel,
+        onKidsAgeLevelChange = onKidsAgeLevelChange,
         confirmLabel = stringResource(R.string.confirm),
         onConfirm = onConfirm,
         onDismiss = onDismiss,
@@ -139,11 +159,16 @@ fun EditProfileDialog(
     useCustomAvatarImage: Boolean = false,
     onAvatarImageSelected: (String) -> Unit = {},
     onRemoveAvatarImage: () -> Unit = {},
+    isKidsProfile: Boolean = false,
+    onKidsProfileChange: (Boolean) -> Unit = {},
+    kidsAgeLevel: KidsAgeLevel = KidsAgeLevel.DEFAULT,
+    onKidsAgeLevelChange: (KidsAgeLevel) -> Unit = {},
     onConfirm: () -> Unit,
     onDelete: () -> Unit,
     onDismiss: () -> Unit,
     onShowPinSetup: () -> Unit = {},
-    onRemovePin: () -> Unit = {}
+    onRemovePin: () -> Unit = {},
+    onChangeParentPin: () -> Unit = {}
 ) {
     ProfileDialogContent(
         title = stringResource(R.string.profile_edit_title),
@@ -158,13 +183,18 @@ fun EditProfileDialog(
         useCustomAvatarImage = useCustomAvatarImage,
         onAvatarImageSelected = onAvatarImageSelected,
         onRemoveAvatarImage = onRemoveAvatarImage,
+        isKidsProfile = isKidsProfile,
+        onKidsProfileChange = onKidsProfileChange,
+        kidsAgeLevel = kidsAgeLevel,
+        onKidsAgeLevelChange = onKidsAgeLevelChange,
         confirmLabel = stringResource(R.string.save),
         onConfirm = onConfirm,
         onDismiss = onDismiss,
         onDelete = onDelete,
         profile = profile,
         onShowPinSetup = onShowPinSetup,
-        onRemovePin = onRemovePin
+        onRemovePin = onRemovePin,
+        onChangeParentPin = onChangeParentPin
     )
 }
 
@@ -187,13 +217,18 @@ private fun ProfileDialogContent(
     useCustomAvatarImage: Boolean,
     onAvatarImageSelected: (String) -> Unit,
     onRemoveAvatarImage: () -> Unit,
+    isKidsProfile: Boolean,
+    onKidsProfileChange: (Boolean) -> Unit,
+    kidsAgeLevel: KidsAgeLevel,
+    onKidsAgeLevelChange: (KidsAgeLevel) -> Unit,
     confirmLabel: String,
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
     onDelete: (() -> Unit)?,
     profile: Profile? = null,
     onShowPinSetup: (() -> Unit)? = null,
-    onRemovePin: (() -> Unit)? = null
+    onRemovePin: (() -> Unit)? = null,
+    onChangeParentPin: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val profileNameHint = stringResource(R.string.profile_name_hint)
@@ -202,6 +237,13 @@ private fun ProfileDialogContent(
     val useMobileLayout = isTouchDevice && configuration.screenWidthDp < 700
     var editTextRef by remember { mutableStateOf<EditText?>(null) }
     val confirmButtonFocusRequester = remember { FocusRequester() }
+    val cancelButtonFocusRequester = remember { FocusRequester() }
+    val uploadButtonFocusRequester = remember { FocusRequester() }
+    val kidsButtonFocusRequester = remember { FocusRequester() }
+    val firstAvatarFocusRequester = remember { FocusRequester() }
+    var isNameInputFocused by remember { mutableStateOf(false) }
+    var isNameBoxFocused by remember { mutableStateOf(false) }
+    val isNameFieldHighlighted = isNameInputFocused || isNameBoxFocused
 
     fun showKeyboard(editText: EditText) {
         editText.post {
@@ -232,13 +274,25 @@ private fun ProfileDialogContent(
 
     fun launchAvatarPicker() {
         hideKeyboard()
-        imagePicker.launch("image/*")
+        try {
+            imagePicker.launch("image/*")
+        } catch (_: android.content.ActivityNotFoundException) {
+            android.widget.Toast.makeText(context, R.string.profile_image_picker_unavailable, android.widget.Toast.LENGTH_LONG).show()
+        } catch (_: SecurityException) {
+            android.widget.Toast.makeText(context, R.string.profile_image_picker_unavailable, android.widget.Toast.LENGTH_LONG).show()
+        }
     }
 
     LaunchedEffect(isTouchDevice, autoFocusNameInput) {
         if (!isTouchDevice && !autoFocusNameInput) {
             // Always give the dialog a visible focused control on TV.
-            runCatching { confirmButtonFocusRequester.requestFocus() }
+            if (name.isNotBlank()) {
+                runCatching { confirmButtonFocusRequester.requestFocus() }
+            } else {
+                runCatching { firstAvatarFocusRequester.requestFocus() }.onFailure {
+                    runCatching { cancelButtonFocusRequester.requestFocus() }
+                }
+            }
         }
     }
 
@@ -272,43 +326,45 @@ private fun ProfileDialogContent(
                         .imePadding()
                         .fillMaxWidth()
                         .heightIn(max = (configuration.screenHeightDp - 24).dp)
-                        .clip(RoundedCornerShape(16.dp))
+                        .clip(RoundedCornerShape(8.dp))
                         .background(Color(0xFF141414))
                         .verticalScroll(rememberScrollState())
-                        .padding(16.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
+                        .padding(20.dp),
+                    horizontalAlignment = Alignment.Start
                 ) {
                     Text(
                         text = title,
-                        fontSize = 19.sp,
+                        fontSize = 22.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = Color.White
                     )
 
                     Spacer(modifier = Modifier.height(14.dp))
 
-                    ProfileAvatarPreview(
-                        name = name,
-                        selectedColorIndex = selectedColorIndex,
-                        selectedAvatarId = selectedAvatarId,
-                        selectedAvatarImageUri = selectedAvatarImageUri,
-                        useCustomAvatarImage = useCustomAvatarImage,
-                        profile = profile,
-                        size = 84.dp,
-                        iconPadding = 8.dp,
-                        letterSize = 34.sp
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                        ProfileAvatarPreview(
+                            name = name,
+                            selectedColorIndex = selectedColorIndex,
+                            selectedAvatarId = selectedAvatarId,
+                            selectedAvatarImageUri = selectedAvatarImageUri,
+                            useCustomAvatarImage = useCustomAvatarImage,
+                            profile = profile,
+                            size = 80.dp,
+                            iconPadding = 8.dp,
+                            letterSize = 34.sp
+                        )
+                        Column(Modifier.weight(1f)) {
+                            AvatarImageButtons(
+                                hasCustomAvatar = hasCustomAvatar,
+                                onUpload = { launchAvatarPicker() },
+                                onRemove = onRemoveAvatarImage
+                            )
+                        }
+                    }
 
                     Spacer(modifier = Modifier.height(12.dp))
-
-                    AvatarImageButtons(
-                        hasCustomAvatar = hasCustomAvatar,
-                        onUpload = { launchAvatarPicker() },
-                        onRemove = onRemoveAvatarImage
-                    )
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
+                    Text(text = profileNameHint, fontSize = 12.sp, color = Color.White.copy(alpha = 0.6f))
+                    Spacer(Modifier.height(6.dp))
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -370,55 +426,96 @@ private fun ProfileDialogContent(
 
                     Spacer(modifier = Modifier.height(14.dp))
 
-                    if (profile != null && onShowPinSetup != null && onRemovePin != null) {
-                        Column(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Text(
-                                text = stringResource(R.string.profile_lock),
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = Color(0xFFB0B0B0),
-                                modifier = Modifier.padding(start = 4.dp)
-                            )
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                if (profile.pin.isNullOrEmpty()) {
-                                    DialogButton(
-                                        text = stringResource(R.string.profile_set_pin),
-                                        isPrimary = false,
-                                        onClick = {
-                                            hideKeyboard()
-                                            onShowPinSetup()
-                                        },
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                } else {
-                                    DialogButton(
-                                        text = stringResource(R.string.profile_change_pin),
-                                        isPrimary = false,
-                                        onClick = {
-                                            hideKeyboard()
-                                            onShowPinSetup()
-                                        },
+                    KidsProfileControls(
+                        profileName = name,
+                        isKidsProfile = isKidsProfile,
+                        onKidsProfileChange = {
+                            hideKeyboard()
+                            onKidsProfileChange(it)
+                        },
+                        kidsAgeLevel = kidsAgeLevel,
+                        onKidsAgeLevelChange = onKidsAgeLevelChange
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    if (profile != null) {
+                        if (profile.isKidsProfile) {
+                            if (onChangeParentPin != null) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Text(
+                                        text = stringResource(R.string.profile_parent_pin_title),
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = Color(0xFFB0B0B0),
                                         modifier = Modifier.weight(1f)
                                     )
                                     DialogButton(
-                                        text = stringResource(R.string.profile_remove_pin),
+                                        text = stringResource(R.string.profile_parent_pin_change),
                                         isPrimary = false,
                                         onClick = {
                                             hideKeyboard()
-                                            onRemovePin()
+                                            onChangeParentPin()
                                         },
-                                        modifier = Modifier.weight(1f)
+                                        modifier = Modifier.weight(1.4f)
                                     )
                                 }
+                                Spacer(modifier = Modifier.height(10.dp))
                             }
+                        } else if (onShowPinSetup != null && onRemovePin != null) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    text = stringResource(R.string.profile_lock),
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color(0xFFB0B0B0),
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Row(
+                                    modifier = Modifier.weight(1.4f),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    if (profile.pin.isNullOrEmpty()) {
+                                        DialogButton(
+                                            text = stringResource(R.string.profile_set_pin),
+                                            isPrimary = false,
+                                            onClick = {
+                                                hideKeyboard()
+                                                onShowPinSetup()
+                                            },
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                    } else {
+                                        DialogButton(
+                                            text = stringResource(R.string.profile_change_pin),
+                                            isPrimary = false,
+                                            onClick = {
+                                                hideKeyboard()
+                                                onShowPinSetup()
+                                            },
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        DialogButton(
+                                            text = stringResource(R.string.profile_remove_pin),
+                                            isPrimary = false,
+                                            onClick = {
+                                                hideKeyboard()
+                                                onRemovePin()
+                                            },
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                    }
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(10.dp))
                         }
-                        Spacer(modifier = Modifier.height(10.dp))
                     }
 
                     Column(
@@ -456,6 +553,7 @@ private fun ProfileDialogContent(
                                     text = stringResource(R.string.delete),
                                     isPrimary = false,
                                     isDestructive = true,
+                                    icon = Icons.Default.DeleteOutline,
                                     onClick = {
                                         hideKeyboard()
                                         onDelete()
@@ -516,8 +614,12 @@ private fun ProfileDialogContent(
                     horizontalArrangement = Arrangement.spacedBy(28.dp)
                 ) {
                     // ---- Left column: preview + name + buttons ----
+                    // Scrolls: with the kids controls the column outgrows a 1080p screen, and
+                    // D-pad focus brings the buttons at its bottom into view.
                     Column(
-                        modifier = Modifier.width(200.dp),
+                        modifier = Modifier
+                            .width(200.dp)
+                            .verticalScroll(rememberScrollState()),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
                         Text(
@@ -547,7 +649,8 @@ private fun ProfileDialogContent(
                         AvatarImageButtons(
                             hasCustomAvatar = hasCustomAvatar,
                             onUpload = { launchAvatarPicker() },
-                            onRemove = onRemoveAvatarImage
+                            onRemove = onRemoveAvatarImage,
+                            uploadFocusRequester = uploadButtonFocusRequester
                         )
 
                         Spacer(modifier = Modifier.height(16.dp))
@@ -556,9 +659,17 @@ private fun ProfileDialogContent(
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .onFocusChanged { state ->
+                                    isNameBoxFocused = state.isFocused
+                                }
+                                .focusable()
                                 .clip(RoundedCornerShape(8.dp))
                                 .background(Color(0xFF222222))
-                                .border(1.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(8.dp))
+                                .border(
+                                    width = if (isNameFieldHighlighted) 2.dp else 1.dp,
+                                    color = if (isNameFieldHighlighted) Color.White else Color.White.copy(alpha = 0.2f),
+                                    shape = RoundedCornerShape(8.dp)
+                                )
                                 .clickable {
                                     editTextRef?.let { et ->
                                         et.requestFocus()
@@ -585,6 +696,48 @@ private fun ProfileDialogContent(
                                         doAfterTextChanged { editable ->
                                             onNameChange(editable?.toString() ?: "")
                                         }
+                                        setOnFocusChangeListener { _, hasFocus ->
+                                            isNameInputFocused = hasFocus
+                                        }
+                                        setOnKeyListener { _, keyCode, event ->
+                                            if (event.action == KeyEvent.ACTION_DOWN) {
+                                                when (keyCode) {
+                                                    KeyEvent.KEYCODE_DPAD_DOWN -> {
+                                                        hideKeyboard(this)
+                                                        clearFocus()
+                                                        runCatching { kidsButtonFocusRequester.requestFocus() }.onFailure {
+                                                            runCatching { cancelButtonFocusRequester.requestFocus() }
+                                                        }
+                                                        true
+                                                    }
+                                                    KeyEvent.KEYCODE_DPAD_UP -> {
+                                                        hideKeyboard(this)
+                                                        clearFocus()
+                                                        runCatching { uploadButtonFocusRequester.requestFocus() }
+                                                        true
+                                                    }
+                                                    KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                                                        hideKeyboard(this)
+                                                        clearFocus()
+                                                        runCatching { firstAvatarFocusRequester.requestFocus() }
+                                                        true
+                                                    }
+                                                    KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
+                                                        val imm = ctx.getSystemService(android.content.Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+                                                        val shown = imm?.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT) ?: false
+                                                        if (!shown) imm?.showSoftInput(this, InputMethodManager.SHOW_FORCED)
+                                                        true
+                                                    }
+                                                    KeyEvent.KEYCODE_BACK -> {
+                                                        hideKeyboard(this)
+                                                        clearFocus()
+                                                        runCatching { cancelButtonFocusRequester.requestFocus() }
+                                                        true
+                                                    }
+                                                    else -> false
+                                                }
+                                            } else false
+                                        }
                                         setOnEditorActionListener { _, actionId, event ->
                                             val isDoneAction = actionId == EditorInfo.IME_ACTION_DONE
                                             val isEnterKey =
@@ -592,10 +745,11 @@ private fun ProfileDialogContent(
                                                     event.action == KeyEvent.ACTION_UP
                                             if (isDoneAction || isEnterKey) {
                                                 hideKeyboard(this)
+                                                clearFocus()
                                                 if (this.text?.toString()?.isNotBlank() == true) {
-                                                    onConfirm()
-                                                } else {
                                                     runCatching { confirmButtonFocusRequester.requestFocus() }
+                                                } else {
+                                                    runCatching { cancelButtonFocusRequester.requestFocus() }
                                                 }
                                                 true
                                             } else false
@@ -614,56 +768,96 @@ private fun ProfileDialogContent(
 
                         Spacer(modifier = Modifier.height(20.dp))
 
+                        KidsProfileControls(
+                            profileName = name,
+                            isKidsProfile = isKidsProfile,
+                            onKidsProfileChange = {
+                                hideKeyboard()
+                                onKidsProfileChange(it)
+                            },
+                            kidsAgeLevel = kidsAgeLevel,
+                            onKidsAgeLevelChange = onKidsAgeLevelChange,
+                            kidsFocusRequester = kidsButtonFocusRequester
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+
                         // PIN Controls (edit mode only)
-                        if (profile != null && onShowPinSetup != null && onRemovePin != null) {
-                            Column(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Text(
-                                    text = stringResource(R.string.profile_lock),
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = Color(0xFFB0B0B0),
-                                    modifier = Modifier.padding(start = 4.dp)
-                                )
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    if (profile.pin.isNullOrEmpty()) {
-                                        DialogButton(
-                                            text = stringResource(R.string.profile_set_pin),
-                                            isPrimary = false,
-                                            onClick = {
-                                                hideKeyboard()
-                                                onShowPinSetup()
-                                            },
-                                            modifier = Modifier.weight(1f)
-                                        )
-                                    } else {
-                                        DialogButton(
-                                            text = stringResource(R.string.profile_change_pin),
-                                            isPrimary = false,
-                                            onClick = {
-                                                hideKeyboard()
-                                                onShowPinSetup()
-                                            },
-                                            modifier = Modifier.weight(1f)
+                        if (profile != null) {
+                            if (profile.isKidsProfile) {
+                                if (onChangeParentPin != null) {
+                                    Column(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Text(
+                                            text = stringResource(R.string.profile_parent_pin_title),
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = Color(0xFFB0B0B0),
+                                            modifier = Modifier.padding(start = 4.dp)
                                         )
                                         DialogButton(
-                                            text = stringResource(R.string.profile_remove_pin),
+                                            text = stringResource(R.string.profile_parent_pin_change),
                                             isPrimary = false,
                                             onClick = {
                                                 hideKeyboard()
-                                                onRemovePin()
+                                                onChangeParentPin()
                                             },
-                                            modifier = Modifier.weight(1f)
+                                            modifier = Modifier.fillMaxWidth()
                                         )
                                     }
+                                    Spacer(modifier = Modifier.height(12.dp))
                                 }
+                            } else if (onShowPinSetup != null && onRemovePin != null) {
+                                Column(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Text(
+                                        text = stringResource(R.string.profile_lock),
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = Color(0xFFB0B0B0),
+                                        modifier = Modifier.padding(start = 4.dp)
+                                    )
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        if (profile.pin.isNullOrEmpty()) {
+                                            DialogButton(
+                                                text = stringResource(R.string.profile_set_pin),
+                                                isPrimary = false,
+                                                onClick = {
+                                                    hideKeyboard()
+                                                    onShowPinSetup()
+                                                },
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                        } else {
+                                            DialogButton(
+                                                text = stringResource(R.string.profile_change_pin),
+                                                isPrimary = false,
+                                                onClick = {
+                                                    hideKeyboard()
+                                                    onShowPinSetup()
+                                                },
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            DialogButton(
+                                                text = stringResource(R.string.profile_remove_pin),
+                                                isPrimary = false,
+                                                onClick = {
+                                                    hideKeyboard()
+                                                    onRemovePin()
+                                                },
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                        }
+                                    }
+                                }
+                                Spacer(modifier = Modifier.height(12.dp))
                             }
-                            Spacer(modifier = Modifier.height(12.dp))
                         }
 
                         // Buttons
@@ -695,7 +889,9 @@ private fun ProfileDialogContent(
                                         hideKeyboard()
                                         onDismiss()
                                     },
-                                    modifier = Modifier.weight(1f)
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .focusRequester(cancelButtonFocusRequester)
                                 )
                                 if (onDelete != null) {
                                     DialogButton(
@@ -738,7 +934,8 @@ private fun ProfileDialogContent(
                                             avatarId = 0,
                                             isSelected = selectedAvatarId == 0,
                                             onClick = { onAvatarSelected(0) },
-                                            isNone = true
+                                            isNone = true,
+                                            modifier = Modifier.focusRequester(firstAvatarFocusRequester)
                                         )
                                     }
                                 }
@@ -835,11 +1032,472 @@ private fun ProfileAvatarPreview(
     }
 }
 
+/** Kids switch plus, while it is on, the age level selector opening Option B dialog. */
+@Composable
+private fun KidsProfileControls(
+    profileName: String = "",
+    isKidsProfile: Boolean,
+    onKidsProfileChange: (Boolean) -> Unit,
+    kidsAgeLevel: KidsAgeLevel,
+    onKidsAgeLevelChange: (KidsAgeLevel) -> Unit,
+    kidsFocusRequester: FocusRequester? = null
+) {
+    val isTouchDevice = LocalDeviceType.current.isTouchDevice()
+    var showAgeLevelDialog by remember { mutableStateOf(false) }
+    val ageLevelButtonFocusRequester = remember { FocusRequester() }
+
+    LaunchedEffect(showAgeLevelDialog) {
+        if (!showAgeLevelDialog && isKidsProfile && !isTouchDevice) {
+            runCatching { ageLevelButtonFocusRequester.requestFocus() }
+        }
+    }
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                text = stringResource(R.string.profile_kids),
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = Color(0xFFB0B0B0),
+                modifier = Modifier.weight(1f).padding(start = 4.dp)
+            )
+            DialogButton(
+                text = stringResource(if (isKidsProfile) R.string.profile_kids_on else R.string.profile_kids_off),
+                isPrimary = isKidsProfile,
+                icon = if (isKidsProfile) Icons.Default.Check else null,
+                onClick = { onKidsProfileChange(!isKidsProfile) },
+                modifier = Modifier
+                    .width(88.dp)
+                    .then(if (kidsFocusRequester != null) Modifier.focusRequester(kidsFocusRequester) else Modifier)
+            )
+        }
+        if (isKidsProfile) {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Text(
+                    text = stringResource(R.string.profile_kids_max_age),
+                    fontSize = 12.sp,
+                    color = Color(0xFFB0B0B0),
+                    modifier = Modifier.padding(start = 4.dp)
+                )
+                KidsAgeLevelSelectorButton(
+                    level = kidsAgeLevel,
+                    onClick = { showAgeLevelDialog = true },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .focusRequester(ageLevelButtonFocusRequester)
+                )
+            }
+            Text(
+                text = stringResource(R.string.profile_kids_hint),
+                fontSize = 11.sp,
+                color = Color.White.copy(alpha = 0.5f),
+                modifier = Modifier.padding(start = 4.dp)
+            )
+        }
+    }
+
+    if (showAgeLevelDialog) {
+        KidsAgeLevelSelectionDialog(
+            profileName = profileName,
+            currentLevel = kidsAgeLevel,
+            onSelect = onKidsAgeLevelChange,
+            onDismiss = { showAgeLevelDialog = false }
+        )
+    }
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun KidsAgeLevelSelectorButton(
+    level: KidsAgeLevel,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val isTouchDevice = LocalDeviceType.current.isTouchDevice()
+    var isFocused by remember { mutableIntStateOf(0) }
+    val badgeInfo = kidsAgeLevelBadgeInfo(level)
+
+    val content: @Composable () -> Unit = {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(24.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(badgeInfo.backgroundColor),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = badgeInfo.badgeText,
+                    fontSize = if (badgeInfo.badgeText.length > 1) 11.sp else 12.sp,
+                    fontWeight = FontWeight.Black,
+                    color = badgeInfo.textColor
+                )
+            }
+            Text(
+                text = stringResource(kidsAgeLevelLabel(level)),
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium,
+                color = if (isFocused > 0 && !isTouchDevice) Color.Black else Color.White,
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = null,
+                tint = if (isFocused > 0 && !isTouchDevice) Color.Black else Color.White.copy(alpha = 0.5f),
+                modifier = Modifier.size(18.dp)
+            )
+        }
+    }
+
+    if (isTouchDevice) {
+        Box(
+            modifier = modifier
+                .clip(RoundedCornerShape(6.dp))
+                .background(Color(0xFF222222))
+                .border(1.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(6.dp))
+                .clickable(onClick = onClick)
+                .heightIn(min = 44.dp),
+            contentAlignment = Alignment.CenterStart
+        ) {
+            content()
+        }
+    } else {
+        Surface(
+            onClick = onClick,
+            modifier = modifier.onFocusChanged { isFocused = if (it.isFocused) 1 else 0 },
+            scale = ClickableSurfaceDefaults.scale(focusedScale = 1f, pressedScale = 1f),
+            shape = ClickableSurfaceDefaults.shape(shape = RoundedCornerShape(6.dp)),
+            colors = ClickableSurfaceDefaults.colors(
+                containerColor = Color(0xFF222222),
+                focusedContainerColor = Color.White
+            ),
+            border = ClickableSurfaceDefaults.border(
+                border = androidx.tv.material3.Border(
+                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.2f)),
+                    shape = RoundedCornerShape(6.dp)
+                ),
+                focusedBorder = androidx.tv.material3.Border(
+                    border = BorderStroke(2.dp, Color.White),
+                    shape = RoundedCornerShape(6.dp)
+                )
+            )
+        ) {
+            content()
+        }
+    }
+}
+
+@Composable
+private fun KidsAgeLevelSelectionDialog(
+    profileName: String = "",
+    currentLevel: KidsAgeLevel,
+    onSelect: (KidsAgeLevel) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val configuration = LocalConfiguration.current
+    val isTouchDevice = LocalDeviceType.current.isTouchDevice()
+    val scrollState = rememberScrollState()
+
+    val focusRequesters = remember {
+        KidsAgeLevel.entries.associateWith { FocusRequester() }
+    }
+    val cancelButtonFocusRequester = remember { FocusRequester() }
+
+    LaunchedEffect(Unit) {
+        if (!isTouchDevice) {
+            runCatching {
+                focusRequesters[currentLevel]?.requestFocus()
+            }
+        }
+    }
+
+    val currentBadge = kidsAgeLevelBadgeInfo(currentLevel).badgeText
+    val subtitleText = if (profileName.isNotBlank()) {
+        stringResource(R.string.profile_kids_rating_subtitle, profileName, currentBadge)
+    } else {
+        stringResource(R.string.profile_kids_rating_subtitle_default, currentBadge)
+    }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false
+        )
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.75f))
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = onDismiss
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(
+                modifier = Modifier
+                    .widthIn(max = if (isTouchDevice) 440.dp else 520.dp)
+                    .fillMaxWidth(0.92f)
+                    .heightIn(max = (configuration.screenHeightDp - 48).coerceAtLeast(300).dp)
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(Color(0xFF161616))
+                    .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(20.dp))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = {} // Prevents clicking inside card from dismissing
+                    )
+                    .padding(24.dp)
+            ) {
+                // Header (Maggie / Netflix style)
+                Text(
+                    text = stringResource(R.string.profile_kids_rating_title),
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = subtitleText,
+                    fontSize = 12.sp,
+                    color = Color.White.copy(alpha = 0.7f),
+                    lineHeight = 16.sp
+                )
+
+                Spacer(modifier = Modifier.height(18.dp))
+
+                // Scrollable list of options
+                Column(
+                    modifier = Modifier
+                        .weight(1f, fill = false)
+                        .verticalScroll(scrollState),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    KidsAgeLevel.entries.forEach { level ->
+                        val isSelected = level == currentLevel
+                        val badgeInfo = kidsAgeLevelBadgeInfo(level)
+                        val title = stringResource(kidsAgeLevelLabel(level))
+                        val description = stringResource(kidsAgeLevelDescription(level))
+                        val requester = focusRequesters[level]
+
+                        KidsAgeLevelOptionItem(
+                            badgeInfo = badgeInfo,
+                            title = title,
+                            description = description,
+                            isSelected = isSelected,
+                            isTouchDevice = isTouchDevice,
+                            modifier = if (requester != null) Modifier.focusRequester(requester) else Modifier,
+                            onClick = {
+                                onSelect(level)
+                                onDismiss()
+                            }
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(18.dp))
+
+                // Bottom cancel button
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    DialogButton(
+                        text = stringResource(R.string.cancel),
+                        isPrimary = false,
+                        onClick = onDismiss,
+                        modifier = Modifier
+                            .width(120.dp)
+                            .then(if (!isTouchDevice) Modifier.focusRequester(cancelButtonFocusRequester) else Modifier)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun KidsAgeLevelOptionItem(
+    badgeInfo: KidsBadgeInfo,
+    title: String,
+    description: String,
+    isSelected: Boolean,
+    isTouchDevice: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    var isFocused by remember { mutableIntStateOf(0) }
+
+    val content: @Composable () -> Unit = {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Badge
+            Box(
+                modifier = Modifier
+                    .size(38.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(badgeInfo.backgroundColor),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = badgeInfo.badgeText,
+                    fontSize = if (badgeInfo.badgeText.length > 1) 16.sp else 18.sp,
+                    fontWeight = FontWeight.Black,
+                    color = badgeInfo.textColor
+                )
+            }
+
+            // Title & Description
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(horizontal = 14.dp)
+            ) {
+                Text(
+                    text = title,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color.White
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = description,
+                    fontSize = 11.sp,
+                    color = Color.White.copy(alpha = 0.65f),
+                    lineHeight = 15.sp
+                )
+            }
+
+            // Radio/Check indicator
+            if (isSelected) {
+                Box(
+                    modifier = Modifier
+                        .size(22.dp)
+                        .clip(CircleShape)
+                        .background(Color.White),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Check,
+                        contentDescription = null,
+                        tint = Color.Black,
+                        modifier = Modifier.size(15.dp)
+                    )
+                }
+            } else {
+                Box(
+                    modifier = Modifier
+                        .size(22.dp)
+                        .clip(CircleShape)
+                        .border(1.5.dp, Color.White.copy(alpha = 0.3f), CircleShape)
+                )
+            }
+        }
+    }
+
+    if (isTouchDevice) {
+        Box(
+            modifier = modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(if (isSelected) Color(0xFF262626) else Color(0xFF1E1E1E))
+                .border(
+                    width = if (isSelected) 1.5.dp else 1.dp,
+                    color = if (isSelected) Color.White.copy(alpha = 0.5f) else Color.White.copy(alpha = 0.08f),
+                    shape = RoundedCornerShape(12.dp)
+                )
+                .clickable(onClick = onClick)
+        ) {
+            content()
+        }
+    } else {
+        Surface(
+            onClick = onClick,
+            modifier = modifier
+                .fillMaxWidth()
+                .onFocusChanged { isFocused = if (it.isFocused) 1 else 0 },
+            scale = ClickableSurfaceDefaults.scale(focusedScale = 1f, pressedScale = 1f),
+            shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(12.dp)),
+            colors = ClickableSurfaceDefaults.colors(
+                containerColor = if (isSelected) Color(0xFF262626) else Color(0xFF1E1E1E),
+                focusedContainerColor = if (isSelected) Color(0xFF353535) else Color(0xFF2D2D2D)
+            ),
+            border = ClickableSurfaceDefaults.border(
+                border = androidx.tv.material3.Border(
+                    border = BorderStroke(
+                        width = if (isSelected) 1.5.dp else 1.dp,
+                        color = if (isSelected) Color.White.copy(alpha = 0.6f) else Color.White.copy(alpha = 0.08f)
+                    ),
+                    shape = RoundedCornerShape(12.dp)
+                ),
+                focusedBorder = androidx.tv.material3.Border(
+                    border = BorderStroke(2.dp, Color.White),
+                    shape = RoundedCornerShape(12.dp)
+                )
+            )
+        ) {
+            content()
+        }
+    }
+}
+
+private data class KidsBadgeInfo(
+    val badgeText: String,
+    val backgroundColor: Color,
+    val textColor: Color
+)
+
+private fun kidsAgeLevelBadgeInfo(level: KidsAgeLevel): KidsBadgeInfo = when (level) {
+    KidsAgeLevel.LITTLE_KIDS -> KidsBadgeInfo("L", Color(0xFF00A859), Color.White)
+    KidsAgeLevel.OLDER_KIDS -> KidsBadgeInfo("10", Color(0xFF009FD6), Color.White)
+    KidsAgeLevel.PRE_TEENS -> KidsBadgeInfo("12", Color(0xFFFFCC00), Color.Black)
+    KidsAgeLevel.TEENS -> KidsBadgeInfo("14", Color(0xFFFF7A00), Color.White)
+}
+
+private fun kidsAgeLevelDescription(level: KidsAgeLevel): Int = when (level) {
+    KidsAgeLevel.LITTLE_KIDS -> R.string.profile_kids_little_desc
+    KidsAgeLevel.OLDER_KIDS -> R.string.profile_kids_older_desc
+    KidsAgeLevel.PRE_TEENS -> R.string.profile_kids_pre_teens_desc
+    KidsAgeLevel.TEENS -> R.string.profile_kids_teens_desc
+}
+
+private fun kidsAgeLevelLabel(level: KidsAgeLevel): Int = when (level) {
+    KidsAgeLevel.LITTLE_KIDS -> R.string.profile_kids_little
+    KidsAgeLevel.OLDER_KIDS -> R.string.profile_kids_older
+    KidsAgeLevel.PRE_TEENS -> R.string.profile_kids_pre_teens
+    KidsAgeLevel.TEENS -> R.string.profile_kids_teens
+}
+
 @Composable
 private fun AvatarImageButtons(
     hasCustomAvatar: Boolean,
     onUpload: () -> Unit,
-    onRemove: () -> Unit
+    onRemove: () -> Unit,
+    uploadFocusRequester: FocusRequester? = null
 ) {
     Column(
         modifier = Modifier.fillMaxWidth(),
@@ -848,8 +1506,11 @@ private fun AvatarImageButtons(
         DialogButton(
             text = if (hasCustomAvatar) stringResource(R.string.profile_change_photo) else stringResource(R.string.profile_upload_photo),
             isPrimary = false,
+            icon = Icons.Default.FileUpload,
             onClick = onUpload,
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier
+                .fillMaxWidth()
+                .then(if (uploadFocusRequester != null) Modifier.focusRequester(uploadFocusRequester) else Modifier)
         )
         if (hasCustomAvatar) {
             DialogButton(
@@ -872,7 +1533,8 @@ private fun AvatarGridItem(
     avatarId: Int,
     isSelected: Boolean,
     onClick: () -> Unit,
-    isNone: Boolean = false
+    isNone: Boolean = false,
+    modifier: Modifier = Modifier
 ) {
     val isTouchDevice = LocalDeviceType.current.isTouchDevice()
     var isFocused by remember { mutableIntStateOf(0) }
@@ -930,13 +1592,13 @@ private fun AvatarGridItem(
 
     if (isTouchDevice) {
         Box(
-            modifier = Modifier
-                .size(54.dp)
-                .clip(RoundedCornerShape(10.dp))
+            modifier = modifier
+                .size(48.dp)
+                .clip(RoundedCornerShape(8.dp))
                 .border(
                     width = if (isSelected || isFocused > 0) 2.dp else 1.dp,
                     color = if (isSelected || isFocused > 0) Color.White else Color.White.copy(alpha = 0.08f),
-                    shape = RoundedCornerShape(10.dp)
+                    shape = RoundedCornerShape(8.dp)
                 )
                 .clickable { onClick() }
                 .onFocusChanged { isFocused = if (it.isFocused) 1 else 0 }
@@ -946,7 +1608,7 @@ private fun AvatarGridItem(
     } else {
         Surface(
             onClick = onClick,
-            modifier = Modifier
+            modifier = modifier
                 .size(54.dp)
                 .scale(scale)
                 .onFocusChanged { isFocused = if (it.isFocused) 1 else 0 },
@@ -989,6 +1651,7 @@ private fun DialogButton(
     isPrimary: Boolean,
     isDestructive: Boolean = false,
     enabled: Boolean = true,
+    icon: ImageVector? = null,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -996,38 +1659,43 @@ private fun DialogButton(
     var isFocused by remember { mutableIntStateOf(0) }
 
     val containerColor = when {
-        isDestructive -> Color(0xFFDC2626)
-        isPrimary -> Color(0xFFE50914)
+        isPrimary -> Color.White
         else -> Color.Transparent
     }
-    val focusedContainerColor = when {
-        isDestructive -> Color(0xFFEF4444)
-        isPrimary -> Color(0xFFFF1A1A)
-        else -> Color.White.copy(alpha = 0.1f)
-    }
+    val focusedContainerColor = Color.White
+    val contentColor = when {
+        isDestructive -> if (isFocused > 0) Color(0xFFB21E32) else Color(0xFFFF6B75)
+        isPrimary || isFocused > 0 -> Color.Black
+        else -> Color.White
+    }.copy(alpha = if (enabled) 1f else 0.4f)
 
     val buttonContent: @Composable () -> Unit = {
-        Box(
-            modifier = Modifier.fillMaxWidth(),
-            contentAlignment = Alignment.Center
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
         ) {
+            if (icon != null) {
+                Icon(icon, null, tint = contentColor, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+            }
             Text(
                 text = text,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Medium,
-                color = if (enabled) Color.White else Color.White.copy(alpha = 0.4f),
-                modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp)
+                color = contentColor
             )
         }
     }
 
     if (isTouchDevice) {
         Box(
+            contentAlignment = Alignment.Center,
             modifier = modifier
                 .clip(RoundedCornerShape(6.dp))
                 .background(containerColor)
                 .then(
-                    if (!isPrimary && !isDestructive) {
+                    if (!isPrimary) {
                         Modifier.border(
                             width = 1.dp,
                             color = Color.White.copy(alpha = 0.3f),
@@ -1037,14 +1705,15 @@ private fun DialogButton(
                         Modifier
                     }
                 )
-                .clickable { if (enabled) onClick() }
-                .heightIn(min = 44.dp)
+                .clickable(enabled = enabled, onClick = onClick)
+                .heightIn(min = 48.dp)
         ) {
             buttonContent()
         }
     } else {
         Surface(
             onClick = { if (enabled) onClick() },
+            enabled = enabled,
             modifier = modifier.onFocusChanged { isFocused = if (it.isFocused) 1 else 0 },
             shape = ClickableSurfaceDefaults.shape(shape = RoundedCornerShape(6.dp)),
             colors = ClickableSurfaceDefaults.colors(

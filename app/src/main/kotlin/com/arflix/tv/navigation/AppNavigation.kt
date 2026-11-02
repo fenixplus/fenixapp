@@ -8,7 +8,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.navigation.NavBackStackEntry
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -22,6 +24,7 @@ import com.arflix.tv.data.model.Profile
 import com.arflix.tv.data.repository.AuthState
 import com.arflix.tv.data.telegram.TelegramRepository
 import com.arflix.tv.ui.screens.details.DetailsScreen
+import com.arflix.tv.ui.screens.home.CategoryViewAllScreen
 import com.arflix.tv.ui.screens.home.HomeScreen
 import com.arflix.tv.ui.screens.login.LoginScreen
 import com.arflix.tv.ui.screens.player.PlayerScreen
@@ -32,6 +35,17 @@ import com.arflix.tv.ui.screens.settings.telegram.TelegramSettingsScreen
 import com.arflix.tv.ui.screens.tv.live.LiveTvScreen
 import com.arflix.tv.ui.screens.watchlist.WatchlistScreen
 import com.arflix.tv.ui.screens.profile.ProfileSelectionScreen
+import com.arflix.tv.ui.screens.profile.PinEntryDialog
+import com.arflix.tv.util.PinUtil
+import com.arflix.tv.R
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import com.arflix.tv.util.LocalDeviceType
 
 /**
@@ -45,6 +59,11 @@ sealed class Screen(val route: String) {
     data object CollectionDetails : Screen("collections/{catalogId}") {
         fun createRoute(catalogId: String): String {
             return "collections/${android.net.Uri.encode(catalogId)}"
+        }
+    }
+    data object CategoryViewAll : Screen("home_category/{categoryId}") {
+        fun createRoute(categoryId: String): String {
+            return "home_category/${android.net.Uri.encode(categoryId)}"
         }
     }
     data object Tv : Screen("tv?channelId={channelId}&streamUrl={streamUrl}") {
@@ -156,18 +175,38 @@ fun AppNavigation(
         }
     }
 
-    NavHost(
-        navController = navController,
-        startDestination = startDestination,
-        // Premium screen transitions — subtle fade + slight depth push.
-        // Netflix TV uses ~250ms fade; this is tuned for Android TV's 60fps.
-        // Pure crossfade — no horizontal slides (those feel mobile, not TV).
-        // Netflix TV uses ~250ms crossfade for all screen transitions.
-        enterTransition = { fadeIn(androidx.compose.animation.core.tween(250)) },
-        exitTransition = { fadeOut(androidx.compose.animation.core.tween(200)) },
-        popEnterTransition = { fadeIn(androidx.compose.animation.core.tween(250)) },
-        popExitTransition = { fadeOut(androidx.compose.animation.core.tween(200)) }
-    ) {
+    val isKids = currentProfile?.isKidsProfile == true
+    val parentPin = currentProfile?.parentPin ?: currentProfile?.pin
+
+    var showExitKidsPinDialog by remember { mutableStateOf(false) }
+    var exitKidsPinError by remember { mutableStateOf("") }
+    val context = LocalContext.current
+
+    val protectedOnSwitchProfile: () -> Unit = {
+        if (isKids && !parentPin.isNullOrEmpty()) {
+            exitKidsPinError = ""
+            showExitKidsPinDialog = true
+        } else {
+            onSwitchProfile()
+            navController.navigate(Screen.ProfileSelection.route) {
+                popUpTo(Screen.Home.route) { inclusive = true }
+            }
+        }
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        NavHost(
+            navController = navController,
+            startDestination = startDestination,
+            // Premium screen transitions — subtle fade + slight depth push.
+            // Netflix TV uses ~250ms fade; this is tuned for Android TV's 60fps.
+            // Pure crossfade — no horizontal slides (those feel mobile, not TV).
+            // Netflix TV uses ~250ms crossfade for all screen transitions.
+            enterTransition = { fadeIn(androidx.compose.animation.core.tween(250)) },
+            exitTransition = { fadeOut(androidx.compose.animation.core.tween(200)) },
+            popEnterTransition = { fadeIn(androidx.compose.animation.core.tween(250)) },
+            popExitTransition = { fadeOut(androidx.compose.animation.core.tween(200)) }
+        ) {
         // Login screen
         composable(Screen.Login.route) {
             LoginScreen(
@@ -192,6 +231,17 @@ fun AppNavigation(
                 },
                 onNavigateToCollection = { catalogId ->
                     navController.navigate(Screen.CollectionDetails.createRoute(catalogId))
+                },
+                onNavigateToCategory = { categoryId ->
+                    if (categoryId == com.arflix.tv.ui.screens.home.HOME_WATCHLIST_ROW_ID) {
+                        navController.navigate(Screen.Watchlist.route) {
+                            popUpTo(Screen.Home.route) { saveState = true }
+                            launchSingleTop = true
+                            restoreState = false
+                        }
+                    } else {
+                        navController.navigate(Screen.CategoryViewAll.createRoute(categoryId))
+                    }
                 },
                 onNavigateToSearch = {
                     navigateTopLevel(Screen.Search.route)
@@ -218,12 +268,7 @@ fun AppNavigation(
                     navigateTopLevel(Screen.Settings.route)
                 },
                 onNavigateToTelegram = onConnectTelegram,
-                onSwitchProfile = {
-                    onSwitchProfile()
-                    navController.navigate(Screen.ProfileSelection.route) {
-                        popUpTo(Screen.Home.route) { inclusive = true }
-                    }
-                },
+                onSwitchProfile = protectedOnSwitchProfile,
                 onExitApp = onExitApp
             )
         }
@@ -239,12 +284,7 @@ fun AppNavigation(
                 onNavigateToWatchlist = { navigateTopLevel(Screen.Watchlist.route) },
                 onNavigateToTv = { navigateTopLevel(Screen.Tv.createRoute()) },
                 onNavigateToSettings = { navigateTopLevel(Screen.Settings.route) },
-                onSwitchProfile = {
-                    onSwitchProfile()
-                    navController.navigate(Screen.ProfileSelection.route) {
-                        popUpTo(Screen.Home.route) { inclusive = true }
-                    }
-                },
+                onSwitchProfile = protectedOnSwitchProfile,
                 onBack = { navigateHome() }
             )
         }
@@ -260,12 +300,7 @@ fun AppNavigation(
                 onNavigateToSearch = { navigateTopLevel(Screen.Search.route) },
                 onNavigateToTv = { navigateTopLevel(Screen.Tv.createRoute()) },
                 onNavigateToSettings = { navigateTopLevel(Screen.Settings.route) },
-                onSwitchProfile = {
-                    onSwitchProfile()
-                    navController.navigate(Screen.ProfileSelection.route) {
-                        popUpTo(Screen.Home.route) { inclusive = true }
-                    }
-                },
+                onSwitchProfile = protectedOnSwitchProfile,
                 onBack = { navigateHome() }
             )
         }
@@ -290,12 +325,7 @@ fun AppNavigation(
                 onNavigateToWatchlist = { navigateTopLevel(Screen.Watchlist.route) },
                 onNavigateToSettings = { navigateTopLevel(Screen.Settings.route) },
                 onNavigateToIptvSettings = { navigateTopLevel(Screen.Settings.createRoute(initialSection = "iptv")) },
-                onSwitchProfile = {
-                    onSwitchProfile()
-                    navController.navigate(Screen.ProfileSelection.route) {
-                        popUpTo(Screen.Home.route) { inclusive = true }
-                    }
-                },
+                onSwitchProfile = protectedOnSwitchProfile,
                 onBack = { navController.popBackStack() }
             )
         }
@@ -323,24 +353,43 @@ fun AppNavigation(
             val autoCloudAuth = backStackEntry.arguments?.getBoolean("autoCloudAuth") ?: false
             val initialSection = backStackEntry.arguments?.getString("initialSection")
             val installPackUrl = backStackEntry.arguments?.getString("installPackUrl")
-            SettingsScreen(
-                currentProfile = currentProfile,
-                autoStartCloudAuth = autoCloudAuth,
-                initialSection = initialSection,
-                installPackUrl = installPackUrl,
-                onNavigateToHome = { navigateHome() },
-                onNavigateToSearch = { navigateTopLevel(Screen.Search.route) },
-                onNavigateToTv = { navigateTopLevel(Screen.Tv.createRoute()) },
-                onNavigateToWatchlist = { navigateTopLevel(Screen.Watchlist.route) },
-                onNavigateToTelegramSettings = { navController.navigate(Screen.TelegramSettings.route) },
-                onSwitchProfile = {
-                    onSwitchProfile()
-                    navController.navigate(Screen.ProfileSelection.route) {
-                        popUpTo(Screen.Home.route) { inclusive = true }
+
+            var settingsUnlocked by rememberSaveable(currentProfile?.id) { mutableStateOf(false) }
+            var settingsPinError by remember { mutableStateOf("") }
+
+            if (isKids && !parentPin.isNullOrEmpty() && !settingsUnlocked) {
+                PinEntryDialog(
+                    title = stringResource(R.string.profile_parent_pin_enter),
+                    setupHint = stringResource(R.string.profile_kids_settings_pin_hint),
+                    pinError = settingsPinError,
+                    onPinConfirmed = { pin ->
+                        if (PinUtil.verifyPin(pin, parentPin)) {
+                            settingsPinError = ""
+                            settingsUnlocked = true
+                        } else {
+                            settingsPinError = context.getString(R.string.profile_pin_incorrect)
+                        }
+                    },
+                    onDismiss = {
+                        settingsPinError = ""
+                        navController.popBackStack()
                     }
-                },
-                onBack = { navController.popBackStack() }
-            )
+                )
+            } else {
+                SettingsScreen(
+                    currentProfile = currentProfile,
+                    autoStartCloudAuth = autoCloudAuth,
+                    initialSection = initialSection,
+                    installPackUrl = installPackUrl,
+                    onNavigateToHome = { navigateHome() },
+                    onNavigateToSearch = { navigateTopLevel(Screen.Search.route) },
+                    onNavigateToTv = { navigateTopLevel(Screen.Tv.createRoute()) },
+                    onNavigateToWatchlist = { navigateTopLevel(Screen.Watchlist.route) },
+                    onNavigateToTelegramSettings = { navController.navigate(Screen.TelegramSettings.route) },
+                    onSwitchProfile = protectedOnSwitchProfile,
+                    onBack = { navController.popBackStack() }
+                )
+            }
         }
 
         // Telegram settings screen
@@ -395,10 +444,50 @@ fun AppNavigation(
                     )
                 },
                 onNavigateToHome = { navigateHome() },
-                onNavigateToSearch = { navigateTopLevel(Screen.Search.route) },
-                onNavigateToWatchlist = { navigateTopLevel(Screen.Watchlist.route) },
-                onNavigateToTv = { navigateTopLevel(Screen.Tv.createRoute()) },
-                onNavigateToSettings = { navigateTopLevel(Screen.Settings.route) },
+                onNavigateToSearch = {
+                    if (!navController.popBackStack(Screen.Search.route, inclusive = false)) {
+                        navigateTopLevel(Screen.Search.route)
+                    }
+                },
+                onNavigateToWatchlist = {
+                    if (!navController.popBackStack(Screen.Watchlist.route, inclusive = false)) {
+                        navigateTopLevel(Screen.Watchlist.route)
+                    }
+                },
+                onNavigateToTv = {
+                    if (!navController.popBackStack(Screen.Tv.route, inclusive = false)) {
+                        navigateTopLevel(Screen.Tv.createRoute())
+                    }
+                },
+                onNavigateToSettings = {
+                    if (!navController.popBackStack(Screen.Settings.route, inclusive = false)) {
+                        navigateTopLevel(Screen.Settings.route)
+                    }
+                },
+                onBack = { navController.popBackStack() }
+            )
+        }
+
+        // Home row "View all" grid. Shares Home's ViewModel so the row's pages and
+        // pagination state live in one place (Home stays on the back stack underneath).
+        composable(
+            route = Screen.CategoryViewAll.route,
+            arguments = listOf(navArgument("categoryId") { type = NavType.StringType })
+        ) { backStackEntry ->
+            val categoryId = backStackEntry.arguments?.getString("categoryId").orEmpty()
+            val homeEntry = remember(backStackEntry) {
+                runCatching { navController.getBackStackEntry(Screen.Home.route) }.getOrNull()
+            }
+            if (categoryId.isBlank() || homeEntry == null) {
+                LaunchedEffect(Unit) { navController.popBackStack() }
+                return@composable
+            }
+            CategoryViewAllScreen(
+                categoryId = categoryId,
+                viewModel = androidx.hilt.navigation.compose.hiltViewModel(homeEntry),
+                onNavigateToDetails = { mediaType, mediaId ->
+                    navController.navigate(Screen.Details.createRoute(mediaType, mediaId))
+                },
                 onBack = { navController.popBackStack() }
             )
         }
@@ -461,23 +550,26 @@ fun AppNavigation(
                     navigateHome()
                 },
                 onNavigateToSearch = {
-                    navigateTopLevel(Screen.Search.route)
-                },
-                onNavigateToTv = {
-                    navigateTopLevel(Screen.Tv.createRoute())
-                },
-                onNavigateToWatchlist = {
-                    navigateTopLevel(Screen.Watchlist.route)
-                },
-                onNavigateToSettings = {
-                    navigateTopLevel(Screen.Settings.route)
-                },
-                onSwitchProfile = {
-                    onSwitchProfile()
-                    navController.navigate(Screen.ProfileSelection.route) {
-                        popUpTo(Screen.Home.route) { inclusive = true }
+                    if (!navController.popBackStack(Screen.Search.route, inclusive = false)) {
+                        navigateTopLevel(Screen.Search.route)
                     }
                 },
+                onNavigateToTv = {
+                    if (!navController.popBackStack(Screen.Tv.route, inclusive = false)) {
+                        navigateTopLevel(Screen.Tv.createRoute())
+                    }
+                },
+                onNavigateToWatchlist = {
+                    if (!navController.popBackStack(Screen.Watchlist.route, inclusive = false)) {
+                        navigateTopLevel(Screen.Watchlist.route)
+                    }
+                },
+                onNavigateToSettings = {
+                    if (!navController.popBackStack(Screen.Settings.route, inclusive = false)) {
+                        navigateTopLevel(Screen.Settings.route)
+                    }
+                },
+                onSwitchProfile = protectedOnSwitchProfile,
                 onBack = { navController.popBackStack() }
             )
         }
@@ -576,4 +668,29 @@ fun AppNavigation(
             )
         }
     }
+
+    if (showExitKidsPinDialog) {
+        PinEntryDialog(
+            title = stringResource(R.string.profile_parent_pin_enter),
+            setupHint = stringResource(R.string.profile_kids_exit_pin_hint),
+            pinError = exitKidsPinError,
+            onPinConfirmed = { pin ->
+                if (PinUtil.verifyPin(pin, parentPin)) {
+                    showExitKidsPinDialog = false
+                    exitKidsPinError = ""
+                    onSwitchProfile()
+                    navController.navigate(Screen.ProfileSelection.route) {
+                        popUpTo(Screen.Home.route) { inclusive = true }
+                    }
+                } else {
+                    exitKidsPinError = context.getString(R.string.profile_pin_incorrect)
+                }
+            },
+            onDismiss = {
+                showExitKidsPinDialog = false
+                exitKidsPinError = ""
+            }
+        )
+    }
+}
 }

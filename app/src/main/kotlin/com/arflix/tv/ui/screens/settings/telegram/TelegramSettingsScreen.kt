@@ -17,6 +17,13 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import android.text.InputType
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
+import android.widget.EditText
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.widget.doAfterTextChanged
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -84,6 +91,7 @@ fun TelegramSettingsScreen(
     val authState by viewModel.authState.collectAsState()
     val cacheSizeBytes by viewModel.cacheSizeBytes.collectAsState()
     var showDisconnectConfirm by remember { mutableStateOf(false) }
+    val backFocusRequester = remember { FocusRequester() }
 
     Box(
         modifier = Modifier
@@ -96,17 +104,36 @@ fun TelegramSettingsScreen(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.padding(bottom = 24.dp)
             ) {
+                var backFocused by remember { mutableStateOf(false) }
                 Box(
                     modifier = Modifier
                         .size(36.dp)
-                        .background(Color.White.copy(alpha = 0.08f), RoundedCornerShape(8.dp))
+                        .focusRequester(backFocusRequester)
+                        .onFocusChanged { backFocused = it.isFocused }
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(
+                            if (backFocused) Color.White.copy(alpha = 0.2f) else Color.White.copy(alpha = 0.08f),
+                            RoundedCornerShape(8.dp)
+                        )
+                        .border(
+                            width = if (backFocused) 2.dp else 0.dp,
+                            color = if (backFocused) Color.White else Color.Transparent,
+                            shape = RoundedCornerShape(8.dp)
+                        )
+                        .onKeyEvent { event ->
+                            if (event.type == KeyEventType.KeyDown && (event.key == Key.Enter || event.key == Key.DirectionCenter || event.key == Key.NumPadEnter)) {
+                                onBack()
+                                true
+                            } else false
+                        }
+                        .focusable()
                         .clickable { onBack() },
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = Icons.Default.ArrowBack,
                         contentDescription = stringResource(R.string.back),
-                        tint = TextPrimary,
+                        tint = if (backFocused) Color.White else TextPrimary,
                         modifier = Modifier.size(20.dp)
                     )
                 }
@@ -134,10 +161,12 @@ fun TelegramSettingsScreen(
                 is TelegramAuthState.WaitQr -> QrContent(link = state.link)
                 is TelegramAuthState.WaitCode -> CodeContent(
                     codeLength = state.codeLength,
-                    onSubmit = { viewModel.submitCode(it) }
+                    onSubmit = { viewModel.submitCode(it) },
+                    backFocusRequester = backFocusRequester
                 )
                 is TelegramAuthState.WaitPassword -> PasswordContent(
-                    onSubmit = { viewModel.submitPassword(it) }
+                    onSubmit = { viewModel.submitPassword(it) },
+                    backFocusRequester = backFocusRequester
                 )
                 is TelegramAuthState.Ready -> ConnectedContent(
                     firstName = state.firstName,
@@ -360,8 +389,15 @@ private fun PhoneContent(onSubmit: (String) -> Unit) {
 
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
-private fun CodeContent(codeLength: Int, onSubmit: (String) -> Unit) {
+private fun CodeContent(
+    codeLength: Int,
+    onSubmit: (String) -> Unit,
+    backFocusRequester: FocusRequester? = null
+) {
     var code by remember { mutableStateOf("") }
+    val confirmFocusRequester = remember { FocusRequester() }
+    val isTouchDevice = LocalDeviceType.current.isTouchDevice()
+
     Column(
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.CenterHorizontally
@@ -397,28 +433,52 @@ private fun CodeContent(codeLength: Int, onSubmit: (String) -> Unit) {
             modifier = Modifier.padding(horizontal = 32.dp)
         )
         Spacer(modifier = Modifier.height(24.dp))
-        TextField(
-            value = code,
-            onValueChange = { if (it.length <= codeLength) code = it },
-            label = { Text(stringResource(R.string.telegram_code_label)) },
-            keyboardOptions = KeyboardOptions(
-                keyboardType = KeyboardType.Number,
-                imeAction = ImeAction.Done
-            ),
-            keyboardActions = KeyboardActions(onDone = { if (code.length == codeLength) onSubmit(code) }),
-            singleLine = true,
-            colors = inputColors(),
-            modifier = Modifier.fillMaxWidth(0.55f)
-        )
+        if (isTouchDevice) {
+            TextField(
+                value = code,
+                onValueChange = { if (it.length <= codeLength) code = it },
+                label = { Text(stringResource(R.string.telegram_code_label)) },
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Number,
+                    imeAction = ImeAction.Done
+                ),
+                keyboardActions = KeyboardActions(onDone = { if (code.length == codeLength) onSubmit(code) }),
+                singleLine = true,
+                colors = inputColors(),
+                modifier = Modifier.fillMaxWidth(0.55f)
+            )
+        } else {
+            TvInputField(
+                value = code,
+                onValueChange = { if (it.length <= codeLength) code = it },
+                hint = stringResource(R.string.telegram_code_label),
+                isNumeric = true,
+                maxLength = codeLength,
+                modifier = Modifier.fillMaxWidth(0.55f),
+                onConfirm = { if (code.isNotBlank()) onSubmit(code) },
+                confirmFocusRequester = confirmFocusRequester,
+                backFocusRequester = backFocusRequester
+            )
+        }
         Spacer(modifier = Modifier.height(20.dp))
-        ActionButton(label = stringResource(R.string.confirm).uppercase()) { if (code.isNotBlank()) onSubmit(code) }
+        ActionButton(
+            label = stringResource(R.string.confirm).uppercase(),
+            modifier = Modifier.focusRequester(confirmFocusRequester),
+            onClick = { if (code.isNotBlank()) onSubmit(code) }
+        )
     }
 }
 
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
-private fun PasswordContent(onSubmit: (String) -> Unit) {
+private fun PasswordContent(
+    onSubmit: (String) -> Unit,
+    backFocusRequester: FocusRequester? = null
+) {
     var password by remember { mutableStateOf("") }
+    val confirmFocusRequester = remember { FocusRequester() }
+    val isTouchDevice = LocalDeviceType.current.isTouchDevice()
+
     Column(
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.CenterHorizontally
@@ -436,22 +496,39 @@ private fun PasswordContent(onSubmit: (String) -> Unit) {
             color = TextSecondary
         )
         Spacer(modifier = Modifier.height(24.dp))
-        TextField(
-            value = password,
-            onValueChange = { password = it },
-            label = { Text(stringResource(R.string.telegram_password_label)) },
-            visualTransformation = PasswordVisualTransformation(),
-            keyboardOptions = KeyboardOptions(
-                keyboardType = KeyboardType.Password,
-                imeAction = ImeAction.Done
-            ),
-            keyboardActions = KeyboardActions(onDone = { onSubmit(password) }),
-            singleLine = true,
-            colors = inputColors(),
-            modifier = Modifier.fillMaxWidth(0.55f)
-        )
+        if (isTouchDevice) {
+            TextField(
+                value = password,
+                onValueChange = { password = it },
+                label = { Text(stringResource(R.string.telegram_password_label)) },
+                visualTransformation = PasswordVisualTransformation(),
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Password,
+                    imeAction = ImeAction.Done
+                ),
+                keyboardActions = KeyboardActions(onDone = { onSubmit(password) }),
+                singleLine = true,
+                colors = inputColors(),
+                modifier = Modifier.fillMaxWidth(0.55f)
+            )
+        } else {
+            TvInputField(
+                value = password,
+                onValueChange = { password = it },
+                hint = stringResource(R.string.telegram_password_label),
+                isPassword = true,
+                modifier = Modifier.fillMaxWidth(0.55f),
+                onConfirm = { onSubmit(password) },
+                confirmFocusRequester = confirmFocusRequester,
+                backFocusRequester = backFocusRequester
+            )
+        }
         Spacer(modifier = Modifier.height(20.dp))
-        ActionButton(label = stringResource(R.string.confirm).uppercase(), onClick = { onSubmit(password) })
+        ActionButton(
+            label = stringResource(R.string.confirm).uppercase(),
+            modifier = Modifier.focusRequester(confirmFocusRequester),
+            onClick = { onSubmit(password) }
+        )
     }
 }
 
@@ -489,16 +566,35 @@ private fun ConnectedContent(
                     color = TextSecondary
                 )
             }
+            var disconnectFocused by remember { mutableStateOf(false) }
             Box(
                 modifier = Modifier
-                    .background(Color.White.copy(alpha = 0.08f), RoundedCornerShape(8.dp))
+                    .onFocusChanged { disconnectFocused = it.isFocused }
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(
+                        if (disconnectFocused) Color.White.copy(alpha = 0.2f) else Color.White.copy(alpha = 0.08f),
+                        RoundedCornerShape(8.dp)
+                    )
+                    .border(
+                        width = if (disconnectFocused) 2.dp else 0.dp,
+                        color = if (disconnectFocused) Color.White else Color.Transparent,
+                        shape = RoundedCornerShape(8.dp)
+                    )
+                    .onKeyEvent { event ->
+                        if (event.type == KeyEventType.KeyDown && (event.key == Key.Enter || event.key == Key.DirectionCenter || event.key == Key.NumPadEnter)) {
+                            onDisconnect()
+                            true
+                        } else false
+                    }
+                    .focusable()
                     .clickable { onDisconnect() }
-                    .padding(horizontal = 12.dp, vertical = 8.dp)
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                contentAlignment = Alignment.Center
             ) {
                 Text(
                     text = stringResource(R.string.telegram_disconnect_btn),
                     style = ArflixTypography.label.copy(fontSize = 11.sp),
-                    color = TextSecondary
+                    color = if (disconnectFocused) Color.White else TextSecondary
                 )
             }
         }
@@ -506,48 +602,60 @@ private fun ConnectedContent(
         Spacer(modifier = Modifier.height(12.dp))
 
         var cacheFocused by remember { mutableStateOf(false) }
-        Row(
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable { if (cacheSizeBytes > 0L) onClearCache() }
                 .onFocusChanged { cacheFocused = it.isFocused }
+                .clip(RoundedCornerShape(12.dp))
                 .background(
-                    if (cacheFocused) Pink.copy(alpha = 0.18f) else Color.White.copy(alpha = 0.04f),
+                    if (cacheFocused) Color.White.copy(alpha = 0.12f) else Color.White.copy(alpha = 0.04f),
                     RoundedCornerShape(12.dp)
                 )
                 .border(
                     width = if (cacheFocused) 2.dp else 1.dp,
-                    color = if (cacheFocused) Pink else Color.White.copy(alpha = 0.08f),
+                    color = if (cacheFocused) Color.White else Color.White.copy(alpha = 0.08f),
                     shape = RoundedCornerShape(12.dp)
                 )
-                .padding(horizontal = 16.dp, vertical = 14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
+                .onKeyEvent { event ->
+                    if (event.type == KeyEventType.KeyDown && (event.key == Key.Enter || event.key == Key.DirectionCenter || event.key == Key.NumPadEnter)) {
+                        if (cacheSizeBytes > 0L) onClearCache()
+                        true
+                    } else false
+                }
+                .focusable()
+                .clickable { if (cacheSizeBytes > 0L) onClearCache() }
+                .padding(horizontal = 16.dp, vertical = 14.dp)
         ) {
-            Column {
-                Text(
-                    text = stringResource(R.string.telegram_video_cache),
-                    style = ArflixTypography.cardTitle.copy(fontSize = 14.sp),
-                    color = if (cacheFocused) Pink else TextPrimary
-                )
-                Text(
-                    text = formatCacheSize(cacheSizeBytes),
-                    style = ArflixTypography.caption.copy(fontSize = 13.sp),
-                    color = TextSecondary
-                )
-            }
-            if (cacheSizeBytes > 0L) {
-                Text(
-                    text = stringResource(R.string.telegram_clear_cache_btn),
-                    style = ArflixTypography.label.copy(fontSize = 11.sp),
-                    color = Pink
-                )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column {
+                    Text(
+                        text = stringResource(R.string.telegram_video_cache),
+                        style = ArflixTypography.cardTitle.copy(fontSize = 14.sp),
+                        color = if (cacheFocused) Color.White else TextPrimary
+                    )
+                    Text(
+                        text = formatCacheSize(cacheSizeBytes),
+                        style = ArflixTypography.caption.copy(fontSize = 13.sp),
+                        color = TextSecondary
+                    )
+                }
+                if (cacheSizeBytes > 0L) {
+                    Text(
+                        text = stringResource(R.string.telegram_clear_cache_btn),
+                        style = ArflixTypography.label.copy(fontSize = 11.sp),
+                        color = if (cacheFocused) Color.White else Pink
+                    )
+                }
             }
         }
     }
 }
 
-@OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
 private fun ErrorContent(message: String, onRetry: () -> Unit) {
     Column(
@@ -565,13 +673,33 @@ private fun ErrorContent(message: String, onRetry: () -> Unit) {
     }
 }
 
-@OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
-private fun ActionButton(label: String, onClick: () -> Unit) {
+private fun ActionButton(
+    label: String,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    var isFocused by remember { mutableStateOf(false) }
     Box(
-        modifier = Modifier
-            .background(Pink.copy(alpha = 0.15f), RoundedCornerShape(999.dp))
-            .border(1.dp, Pink.copy(alpha = 0.4f), RoundedCornerShape(999.dp))
+        modifier = modifier
+            .onFocusChanged { isFocused = it.isFocused }
+            .clip(RoundedCornerShape(999.dp))
+            .background(
+                if (isFocused) Pink.copy(alpha = 0.35f) else Pink.copy(alpha = 0.15f),
+                RoundedCornerShape(999.dp)
+            )
+            .border(
+                width = if (isFocused) 2.dp else 1.dp,
+                color = if (isFocused) Color.White else Pink.copy(alpha = 0.4f),
+                shape = RoundedCornerShape(999.dp)
+            )
+            .onKeyEvent { event ->
+                if (event.type == KeyEventType.KeyDown && (event.key == Key.Enter || event.key == Key.DirectionCenter || event.key == Key.NumPadEnter)) {
+                    onClick()
+                    true
+                } else false
+            }
+            .focusable()
             .clickable { onClick() }
             .padding(horizontal = 24.dp, vertical = 12.dp),
         contentAlignment = Alignment.Center
@@ -579,7 +707,155 @@ private fun ActionButton(label: String, onClick: () -> Unit) {
         Text(
             text = label,
             style = ArflixTypography.label.copy(fontSize = 13.sp, letterSpacing = 0.8.sp),
-            color = Pink
+            color = if (isFocused) Color.White else Pink
+        )
+    }
+}
+
+@Composable
+private fun TvInputField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    hint: String,
+    isPassword: Boolean = false,
+    isNumeric: Boolean = false,
+    maxLength: Int = Int.MAX_VALUE,
+    modifier: Modifier = Modifier,
+    onConfirm: () -> Unit = {},
+    confirmFocusRequester: FocusRequester? = null,
+    backFocusRequester: FocusRequester? = null
+) {
+    val context = LocalContext.current
+    var editTextRef by remember { mutableStateOf<EditText?>(null) }
+    var isInputFocused by remember { mutableStateOf(false) }
+    var isBoxFocused by remember { mutableStateOf(false) }
+    val isHighlighted = isInputFocused || isBoxFocused
+
+    fun hideKeyboard(editText: EditText? = editTextRef) {
+        editText?.post {
+            val imm = context.getSystemService(android.content.Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+            imm?.hideSoftInputFromWindow(editText.windowToken, 0)
+            editText.clearFocus()
+        }
+    }
+
+    fun showKeyboard(editText: EditText) {
+        editText.post {
+            val imm = context.getSystemService(android.content.Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+            val shown = imm?.showSoftInput(editText, InputMethodManager.SHOW_IMPLICIT) ?: false
+            if (!shown) {
+                @Suppress("DEPRECATION")
+                imm?.showSoftInput(editText, InputMethodManager.SHOW_FORCED)
+            }
+        }
+    }
+
+    Box(
+        modifier = modifier
+            .onFocusChanged { state ->
+                isBoxFocused = state.isFocused
+            }
+            .focusable()
+            .clip(RoundedCornerShape(10.dp))
+            .background(Color(0xFF222222))
+            .border(
+                width = if (isHighlighted) 2.dp else 1.dp,
+                color = if (isHighlighted) Color.White else Color.White.copy(alpha = 0.2f),
+                shape = RoundedCornerShape(10.dp)
+            )
+            .clickable {
+                editTextRef?.let { et ->
+                    et.requestFocus()
+                    showKeyboard(et)
+                }
+            }
+    ) {
+        AndroidView(
+            factory = { ctx ->
+                EditText(ctx).apply {
+                    editTextRef = this
+                    setText(value)
+                    setTextColor(android.graphics.Color.WHITE)
+                    setHintTextColor(android.graphics.Color.GRAY)
+                    setHint(hint)
+                    textSize = 16f
+                    background = null
+                    setPadding(32, 28, 32, 28)
+                    isSingleLine = true
+                    inputType = when {
+                        isPassword -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                        isNumeric -> InputType.TYPE_CLASS_NUMBER
+                        else -> InputType.TYPE_CLASS_TEXT
+                    }
+                    if (isPassword) {
+                        transformationMethod = android.text.method.PasswordTransformationMethod.getInstance()
+                    }
+                    imeOptions = EditorInfo.IME_ACTION_DONE
+                    isFocusable = true
+                    isFocusableInTouchMode = true
+                    doAfterTextChanged { editable ->
+                        val text = editable?.toString() ?: ""
+                        if (text.length <= maxLength) {
+                            onValueChange(text)
+                        } else {
+                            setText(text.take(maxLength))
+                            setSelection(maxLength)
+                        }
+                    }
+                    setOnFocusChangeListener { _, hasFocus ->
+                        isInputFocused = hasFocus
+                    }
+                    setOnKeyListener { _, keyCode, event ->
+                        if (event.action == android.view.KeyEvent.ACTION_DOWN) {
+                            when (keyCode) {
+                                android.view.KeyEvent.KEYCODE_DPAD_DOWN -> {
+                                    hideKeyboard(this)
+                                    clearFocus()
+                                    runCatching { confirmFocusRequester?.requestFocus() }
+                                    true
+                                }
+                                android.view.KeyEvent.KEYCODE_DPAD_UP -> {
+                                    hideKeyboard(this)
+                                    clearFocus()
+                                    runCatching { backFocusRequester?.requestFocus() }
+                                    true
+                                }
+                                android.view.KeyEvent.KEYCODE_DPAD_CENTER, android.view.KeyEvent.KEYCODE_ENTER -> {
+                                    showKeyboard(this)
+                                    true
+                                }
+                                android.view.KeyEvent.KEYCODE_BACK -> {
+                                    hideKeyboard(this)
+                                    clearFocus()
+                                    true
+                                }
+                                else -> false
+                            }
+                        } else false
+                    }
+                    setOnEditorActionListener { _, actionId, event ->
+                        val isDoneAction = actionId == EditorInfo.IME_ACTION_DONE
+                        val isEnterKey = event?.keyCode == android.view.KeyEvent.KEYCODE_ENTER && event.action == android.view.KeyEvent.ACTION_UP
+                        if (isDoneAction || isEnterKey) {
+                            hideKeyboard(this)
+                            clearFocus()
+                            if (value.isNotBlank()) {
+                                onConfirm()
+                            } else {
+                                runCatching { confirmFocusRequester?.requestFocus() }
+                            }
+                            true
+                        } else false
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+            update = { et ->
+                if (et.text.toString() != value) {
+                    et.setText(value)
+                    et.setSelection(value.length)
+                }
+            }
         )
     }
 }
@@ -646,7 +922,7 @@ private fun DisconnectConfirmDialog(onConfirm: () -> Unit, onDismiss: () -> Unit
                         )
                         .border(
                             width = if (focusedButton == 0) 2.dp else 0.dp,
-                            color = if (focusedButton == 0) Color.White.copy(alpha = 0.5f) else Color.Transparent,
+                            color = if (focusedButton == 0) Color.White else Color.Transparent,
                             shape = RoundedCornerShape(8.dp)
                         )
                         .clickable { onDismiss() }
@@ -656,7 +932,7 @@ private fun DisconnectConfirmDialog(onConfirm: () -> Unit, onDismiss: () -> Unit
                     Text(
                         text = stringResource(R.string.cancel).uppercase(),
                         style = ArflixTypography.label.copy(fontSize = 12.sp),
-                        color = TextPrimary
+                        color = if (focusedButton == 0) Color.White else TextPrimary
                     )
                 }
                 Box(
@@ -668,7 +944,7 @@ private fun DisconnectConfirmDialog(onConfirm: () -> Unit, onDismiss: () -> Unit
                         )
                         .border(
                             width = if (focusedButton == 1) 2.dp else 1.dp,
-                            color = if (focusedButton == 1) Pink else Pink.copy(alpha = 0.35f),
+                            color = if (focusedButton == 1) Color.White else Pink.copy(alpha = 0.35f),
                             shape = RoundedCornerShape(8.dp)
                         )
                         .clickable { onConfirm() }
@@ -678,7 +954,7 @@ private fun DisconnectConfirmDialog(onConfirm: () -> Unit, onDismiss: () -> Unit
                     Text(
                         text = stringResource(R.string.telegram_disconnect_btn),
                         style = ArflixTypography.label.copy(fontSize = 12.sp),
-                        color = Pink
+                        color = if (focusedButton == 1) Color.White else Pink
                     )
                 }
             }

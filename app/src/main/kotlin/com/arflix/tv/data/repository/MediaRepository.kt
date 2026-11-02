@@ -28,6 +28,7 @@ import com.arflix.tv.data.model.CollectionSourceConfig
 import com.arflix.tv.data.model.CollectionSourceKind
 import com.arflix.tv.data.model.CollectionTileShape
 import com.arflix.tv.data.model.Episode
+import com.arflix.tv.data.model.KidsAgeLevel
 import com.arflix.tv.data.model.MediaItem
 import com.arflix.tv.data.model.MediaType
 import com.arflix.tv.data.model.PersonDetails
@@ -35,6 +36,7 @@ import com.arflix.tv.data.model.Review
 import com.arflix.tv.data.model.SportsAddonCapabilities
 import com.arflix.tv.util.CatalogUrlParser
 import com.arflix.tv.util.Constants
+import com.arflix.tv.util.ContentRating
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -58,6 +60,7 @@ import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import com.arflix.tv.util.ParsedCatalogUrl
 import javax.inject.Inject
+import javax.inject.Provider
 import javax.inject.Singleton
 
 data class StreamingServiceInfo(
@@ -77,6 +80,11 @@ data class PersonMediaSearchResult(
     val items: List<MediaItem>
 )
 
+data class MediaSearchResults(
+    val items: List<MediaItem>,
+    val people: List<PersonMediaSearchResult>
+)
+
 /**
  * Repository for media data from TMDB
  * Cross-references with Trakt for watched status
@@ -90,7 +98,8 @@ class MediaRepository @Inject constructor(
     private val traktApi: TraktApi,
     private val okHttpClient: OkHttpClient,
     private val streamRepository: StreamRepository,
-    private val homeServerRepository: HomeServerRepository
+    private val homeServerRepository: HomeServerRepository,
+    private val kidsContentFilter: Provider<KidsContentFilter>
 ) {
 
     data class CategoryPageResult(
@@ -116,7 +125,17 @@ class MediaRepository @Inject constructor(
     @Volatile var cachedHomeCategories: List<Category> = emptyList()
         private set
     @Volatile private var homeCategoriesFetchedAt = 0L
+    @Volatile var cachedKidsHomeCategories: List<Category> = emptyList()
+        private set
+    @Volatile private var kidsHomeCategoriesFetchedAt = 0L
     private val HOME_CATEGORIES_CACHE_MS = 120_000L // 2 minutes
+
+    fun clearHomeCategoriesCache() {
+        cachedHomeCategories = emptyList()
+        cachedKidsHomeCategories = emptyList()
+        homeCategoriesFetchedAt = 0L
+        kidsHomeCategoriesFetchedAt = 0L
+    }
 
     private val detailsCache = mutableMapOf<String, CacheEntry<MediaItem>>()
     private val fullDetailsCacheKeys = mutableSetOf<String>()
@@ -187,8 +206,12 @@ class MediaRepository @Inject constructor(
     }
 
     private fun collectionRefsCacheKey(catalog: CatalogConfig): String {
+        val kidsLevel = runCatching { kidsContentFilter.get().state.value.level }.getOrNull()
         return buildString {
             append(catalog.id)
+            if (kidsLevel != null) {
+                append("_kids_${kidsLevel.name}")
+            }
             append('|')
             catalog.collectionSources.forEach { source ->
                 append(source.kind.name)
@@ -1604,38 +1627,24 @@ class MediaRepository @Inject constructor(
     }
 
     private suspend fun getHomeCategoriesInternal(): List<Category> = coroutineScope {
-        suspend fun fetchUpTo40(fetchPage: suspend (Int) -> TmdbListResponse): List<TmdbMediaItem> {
+        suspend fun fetchInitialHome(fetchPage: suspend (Int) -> TmdbListResponse): List<TmdbMediaItem> {
             val first = runCatching { fetchPage(1) }.getOrNull() ?: return emptyList()
-            val firstItems = first.results
-            if (firstItems.size >= 40 || first.totalPages < 2) return firstItems.take(40)
-            val secondItems = runCatching { fetchPage(2) }.getOrNull()?.results.orEmpty()
-            return (firstItems + secondItems).distinctBy { it.id }.take(40)
+            return first.results.take(16)
         }
 
-        val dateFormat = SimpleDateFormat("yyyy-MM-dd", Locale.US)
-        val calendar = Calendar.getInstance()
-        // Wider windows keep rows filled up to 40 items consistently.
-        calendar.add(Calendar.MONTH, -12)
-        val twelveMonthsAgo = dateFormat.format(calendar.time)
-        // Anime needs a wider horizon for slower seasonal cycles.
-        calendar.time = Calendar.getInstance().time
-        calendar.add(Calendar.MONTH, -18)
-        val eighteenMonthsAgo = dateFormat.format(calendar.time)
+        // Main trending - TMDB's daily trending for fresh content (16 items initially)
+        val trendingMovies = async { fetchInitialHome { page -> tmdbApi.getTrendingMovies(apiKey, language = contentLanguage, page = page) } }
+        val trendingTv = async { fetchInitialHome { page -> tmdbApi.getTrendingTv(apiKey, language = contentLanguage, page = page) } }
 
-        // Main trending - TMDB's daily trending for fresh content
-        val trendingMovies = async { fetchUpTo40 { page -> tmdbApi.getTrendingMovies(apiKey, language = contentLanguage, page = page) } }
-        val trendingTv = async { fetchUpTo40 { page -> tmdbApi.getTrendingTv(apiKey, language = contentLanguage, page = page) } }
-
-        // Anime: popularity.desc tracks current buzz, air_date filter for currently airing
+        // Anime: popularity.desc tracks current buzz and timeless favorites
         val trendingAnime = async {
-            fetchUpTo40 { page ->
+            fetchInitialHome { page ->
                 tmdbApi.discoverTv(
                     apiKey, language = contentLanguage,
                     genres = "16",
                     keywords = "210024",  // "anime" keyword ID
                     sortBy = "popularity.desc",
                     minVoteCount = 10,
-                    airDateGte = eighteenMonthsAgo,
                     page = page
                 )
             }
@@ -1647,7 +1656,7 @@ class MediaRepository @Inject constructor(
         // feeds from addon catalogs. Having duplicate rows below the tiles
         // was noise per user feedback.
 
-        val maxItemsPerCategory = 40
+        val maxItemsPerCategory = 16
         suspend fun safeItems(fetch: suspend () -> List<TmdbMediaItem>, mediaType: MediaType): List<MediaItem> {
             return runCatching { fetch() }
                 .getOrElse { emptyList() }
@@ -1677,19 +1686,250 @@ class MediaRepository @Inject constructor(
         nonEmpty
     }
 
+    suspend fun getKidsHomeCategories(kidsLevel: KidsAgeLevel?): List<Category> = coroutineScope {
+        val now = System.currentTimeMillis()
+        if (cachedKidsHomeCategories.isNotEmpty() && now - kidsHomeCategoriesFetchedAt < HOME_CATEGORIES_CACHE_MS) {
+            return@coroutineScope cachedKidsHomeCategories
+        }
+        var result = getKidsHomeCategoriesInternal(kidsLevel)
+        if (result.isEmpty()) {
+            kotlinx.coroutines.delay(1_500L)
+            result = getKidsHomeCategoriesInternal(kidsLevel)
+        }
+        if (result.isNotEmpty()) {
+            cachedKidsHomeCategories = result
+            kidsHomeCategoriesFetchedAt = System.currentTimeMillis()
+        }
+        result
+    }
+
+    private suspend fun getKidsHomeCategoriesInternal(kidsLevel: KidsAgeLevel?): List<Category> = coroutineScope {
+        val maxAge = kidsLevel?.maxAge ?: 10
+
+        // Classificação indicativa oficial brasileira (ClassInd) no TMDb:
+        // L (Livre), 10, 12, 14
+        val certLte = when (kidsLevel) {
+            KidsAgeLevel.LITTLE_KIDS -> "L"
+            KidsAgeLevel.OLDER_KIDS -> "10"
+            KidsAgeLevel.PRE_TEENS -> "12"
+            KidsAgeLevel.TEENS -> "14"
+            else -> "L"
+        }
+
+        val targetCount = 16
+        val maxPagesToSearch = 3
+        val filter = kidsContentFilter.get()
+
+        // Loop dinâmico de coleta: avança páginas no TMDb até atingir [targetCount] itens aprovados
+        suspend fun fetchTargetItems(
+            mediaType: MediaType,
+            fetchPage: suspend (Int) -> TmdbListResponse
+        ): List<MediaItem> {
+            val collected = mutableListOf<MediaItem>()
+            var page = 1
+            var totalPages = 1
+            while (collected.size < targetCount && page <= totalPages && page <= maxPagesToSearch) {
+                val resp = runCatching { fetchPage(page) }.getOrNull() ?: break
+                totalPages = resp.totalPages
+                val pageItems = resp.results.map { it.toMediaItem(mediaType) }
+                if (pageItems.isNotEmpty()) {
+                    filter.ensureAgesCached(pageItems)
+                    val allowed = pageItems.filter(filter.state.value::allows)
+                    for (item in allowed) {
+                        if (collected.none { it.id == item.id }) {
+                            collected.add(item)
+                            if (collected.size >= targetCount) break
+                        }
+                    }
+                }
+                page++
+            }
+            return collected
+        }
+
+        // 1. Filmes (Geral: os mais populares e bem avaliados do cinema para a idade)
+        val generalMovies = async {
+            fetchTargetItems(MediaType.MOVIE) { page ->
+                tmdbApi.discoverMovies(
+                    apiKey = apiKey,
+                    language = contentLanguage,
+                    genres = if (maxAge <= 7) "10751,16" else null,
+                    sortBy = "popularity.desc",
+                    minVoteCount = 15,
+                    certificationCountry = "BR",
+                    certificationLte = certLte,
+                    page = page
+                )
+            }
+        }
+
+        // 2. Séries e Desenhos (Para <= 10 anos une séries e desenhos; para 12 e 14 anos separa)
+        val generalSeries = if (maxAge > 10) {
+            async {
+                fetchTargetItems(MediaType.TV) { page ->
+                    tmdbApi.discoverTv(
+                        apiKey = apiKey,
+                        language = contentLanguage,
+                        withoutGenres = "16", // EXCLUI 100% dos desenhos para 12/14 anos
+                        sortBy = "popularity.desc",
+                        minVoteCount = 10,
+                        page = page
+                    )
+                }
+            }
+        } else null
+
+        // 3. Desenhos Animados (ou Séries e Desenhos unidos para <= 10 anos)
+        val cartoonsOrUnifiedSeries = async {
+            fetchTargetItems(MediaType.TV) { page ->
+                if (maxAge <= 10) {
+                    // Para até 10 anos: une séries e desenhos (Kids 10762 OU Animação 16)
+                    tmdbApi.discoverTv(
+                        apiKey = apiKey,
+                        language = contentLanguage,
+                        genres = "10762|16",
+                        sortBy = "popularity.desc",
+                        minVoteCount = 5,
+                        page = page
+                    )
+                } else {
+                    // Para 12 e 14 anos: estritamente desenhos animados
+                    tmdbApi.discoverTv(
+                        apiKey = apiKey,
+                        language = contentLanguage,
+                        genres = "16",
+                        sortBy = "popularity.desc",
+                        minVoteCount = 5,
+                        page = page
+                    )
+                }
+            }
+        }
+
+        // 4. Aventura e Fantasia / Ficção Científica
+        val adventureOrSciFi = async {
+            fetchTargetItems(MediaType.MOVIE) { page ->
+                val genres = when {
+                    maxAge >= 14 -> "878,12" // Ficção Científica e Aventura
+                    maxAge >= 12 -> "878,14" // Ficção Científica e Fantasia
+                    else -> "12,14,10751"   // Aventura e Fantasia
+                }
+                tmdbApi.discoverMovies(
+                    apiKey = apiKey,
+                    language = contentLanguage,
+                    genres = genres,
+                    sortBy = "popularity.desc",
+                    minVoteCount = 15,
+                    certificationCountry = "BR",
+                    certificationLte = certLte,
+                    page = page
+                )
+            }
+        }
+
+        // 5. Comédias (Filmes de comédia)
+        val comedies = async {
+            fetchTargetItems(MediaType.MOVIE) { page ->
+                tmdbApi.discoverMovies(
+                    apiKey = apiKey,
+                    language = contentLanguage,
+                    genres = if (maxAge <= 10) "35,10751" else "35",
+                    sortBy = "popularity.desc",
+                    minVoteCount = 15,
+                    certificationCountry = "BR",
+                    certificationLte = certLte,
+                    page = page
+                )
+            }
+        }
+
+        // 6. Animes (Animações japonesas para a faixa etária - omitido no perfil Livre pois o catálogo no TMDB para essa faixa é mínimo)
+        val anime = if (kidsLevel != KidsAgeLevel.LITTLE_KIDS) {
+            async {
+                fetchTargetItems(MediaType.TV) { page ->
+                    tmdbApi.discoverTv(
+                        apiKey = apiKey,
+                        language = contentLanguage,
+                        genres = "16",
+                        keywords = "210024",
+                        sortBy = "popularity.desc",
+                        minVoteCount = 5,
+                        page = page
+                    )
+                }
+            }
+        } else null
+
+        val categories = buildList {
+            // Topo da Home Kids: Filmes
+            add(
+                Category(
+                    id = "kids_movies",
+                    title = context.getString(R.string.kids_movies),
+                    items = generalMovies.await()
+                )
+            )
+
+            if (maxAge <= 10) {
+                // Para até 10 anos: Séries e Desenhos unidos em uma única fileira
+                add(
+                    Category(
+                        id = "kids_cartoons",
+                        title = context.getString(R.string.kids_cartoons),
+                        items = cartoonsOrUnifiedSeries.await()
+                    )
+                )
+                add(Category(id = "kids_adventure_fantasy", title = context.getString(R.string.kids_adventure_fantasy), items = adventureOrSciFi.await()))
+                add(Category(id = "kids_comedies", title = context.getString(R.string.kids_comedies), items = comedies.await()))
+                anime?.let {
+                    add(Category(id = "kids_anime", title = context.getString(R.string.kids_anime), items = it.await()))
+                }
+            } else if (maxAge <= 12) {
+                // Para 12 anos: Séries live-action separadas, Ficção Científica, depois Desenhos
+                generalSeries?.let {
+                    add(Category(id = "kids_series", title = context.getString(R.string.kids_series), items = it.await()))
+                }
+                add(Category(id = "kids_scifi_fantasy", title = context.getString(R.string.kids_scifi_fantasy), items = adventureOrSciFi.await()))
+                add(Category(id = "kids_cartoons", title = context.getString(R.string.kids_cartoons), items = cartoonsOrUnifiedSeries.await()))
+                add(Category(id = "kids_comedies", title = context.getString(R.string.kids_comedies), items = comedies.await()))
+                anime?.let {
+                    add(Category(id = "kids_anime", title = context.getString(R.string.kids_anime), items = it.await()))
+                }
+            } else {
+                // Para 14 anos: Séries live-action separadas, Ficção, Comédias, Animes e Desenhos mais abaixo
+                generalSeries?.let {
+                    add(Category(id = "kids_series", title = context.getString(R.string.kids_series), items = it.await()))
+                }
+                add(Category(id = "kids_scifi_adventure", title = context.getString(R.string.kids_scifi_adventure), items = adventureOrSciFi.await()))
+                add(Category(id = "kids_comedies", title = context.getString(R.string.kids_comedies), items = comedies.await()))
+                anime?.let {
+                    add(Category(id = "kids_anime", title = context.getString(R.string.kids_anime), items = it.await()))
+                }
+                add(Category(id = "kids_cartoons", title = context.getString(R.string.kids_cartoons), items = cartoonsOrUnifiedSeries.await()))
+            }
+        }
+
+        val verifiedCategories = categories.filter { it.items.isNotEmpty() }
+        verifiedCategories.forEach { cacheItems(it.items) }
+        verifiedCategories
+    }
+
     suspend fun loadHomeCategoryPage(
         categoryId: String,
         page: Int
     ): CategoryPageResult {
         if (page < 1) return CategoryPageResult(emptyList(), hasMore = false)
 
-        val dateFormat = SimpleDateFormat("yyyy-MM-dd", Locale.US)
-        val calendar = Calendar.getInstance()
-        calendar.add(Calendar.MONTH, -12)
-        val twelveMonthsAgo = dateFormat.format(calendar.time)
-        calendar.time = Calendar.getInstance().time
-        calendar.add(Calendar.MONTH, -18)
-        val eighteenMonthsAgo = dateFormat.format(calendar.time)
+        val filter = kidsContentFilter.get()
+        val kidsLevel = filter.state.value.level
+        val maxAge = kidsLevel?.maxAge ?: 10
+        val certLte = when (kidsLevel) {
+            KidsAgeLevel.LITTLE_KIDS -> "L"
+            KidsAgeLevel.OLDER_KIDS -> "10"
+            KidsAgeLevel.PRE_TEENS -> "12"
+            KidsAgeLevel.TEENS -> "14"
+            else -> "L"
+        }
 
         val response = runCatching {
             when (categoryId) {
@@ -1701,20 +1941,104 @@ class MediaRepository @Inject constructor(
                     keywords = "210024",
                     sortBy = "popularity.desc",
                     minVoteCount = 10,
-                    airDateGte = eighteenMonthsAgo,
                     page = page
                 )
-                // trending_netflix / _disney / _prime / _hbo / _apple /
-                // _paramount / _hulu / _peacock rows have been retired in
-                // favor of the Services collection-tile row.
+                "kids_movies" -> tmdbApi.discoverMovies(
+                    apiKey = apiKey,
+                    language = contentLanguage,
+                    genres = if (maxAge <= 7) "10751,16" else null,
+                    sortBy = "popularity.desc",
+                    minVoteCount = 15,
+                    certificationCountry = "BR",
+                    certificationLte = certLte,
+                    page = page
+                )
+                "kids_series" -> tmdbApi.discoverTv(
+                    apiKey = apiKey,
+                    language = contentLanguage,
+                    withoutGenres = "16",
+                    sortBy = "popularity.desc",
+                    minVoteCount = 10,
+                    page = page
+                )
+                "kids_cartoons" -> tmdbApi.discoverTv(
+                    apiKey = apiKey,
+                    language = contentLanguage,
+                    genres = if (maxAge <= 10) "10762|16" else "16",
+                    sortBy = "popularity.desc",
+                    minVoteCount = 5,
+                    page = page
+                )
+                "kids_adventure_fantasy" -> tmdbApi.discoverMovies(
+                    apiKey = apiKey,
+                    language = contentLanguage,
+                    genres = "12,14,10751",
+                    sortBy = "popularity.desc",
+                    minVoteCount = 15,
+                    certificationCountry = "BR",
+                    certificationLte = certLte,
+                    page = page
+                )
+                "kids_scifi_fantasy" -> tmdbApi.discoverMovies(
+                    apiKey = apiKey,
+                    language = contentLanguage,
+                    genres = "878,14",
+                    sortBy = "popularity.desc",
+                    minVoteCount = 15,
+                    certificationCountry = "BR",
+                    certificationLte = certLte,
+                    page = page
+                )
+                "kids_scifi_adventure" -> tmdbApi.discoverMovies(
+                    apiKey = apiKey,
+                    language = contentLanguage,
+                    genres = "878,12",
+                    sortBy = "popularity.desc",
+                    minVoteCount = 15,
+                    certificationCountry = "BR",
+                    certificationLte = certLte,
+                    page = page
+                )
+                "kids_comedies" -> tmdbApi.discoverMovies(
+                    apiKey = apiKey,
+                    language = contentLanguage,
+                    genres = if (maxAge <= 10) "35,10751" else "35",
+                    sortBy = "popularity.desc",
+                    minVoteCount = 15,
+                    certificationCountry = "BR",
+                    certificationLte = certLte,
+                    page = page
+                )
+                "kids_anime" -> if (kidsLevel != KidsAgeLevel.LITTLE_KIDS) {
+                    tmdbApi.discoverTv(
+                        apiKey = apiKey,
+                        language = contentLanguage,
+                        genres = "16",
+                        keywords = "210024",
+                        sortBy = "popularity.desc",
+                        minVoteCount = 5,
+                        page = page
+                    )
+                } else null
                 else -> null
             }
         }.getOrNull() ?: return CategoryPageResult(emptyList(), hasMore = false)
 
-        val mediaType = if (categoryId == "trending_movies") MediaType.MOVIE else MediaType.TV
-        val items = response.results
+        val mediaType = if (categoryId in listOf(
+            "trending_movies", "kids_movies", "kids_adventure_fantasy", "kids_scifi_fantasy", "kids_scifi_adventure", "kids_comedies"
+        )) MediaType.MOVIE else MediaType.TV
+        val rawItems = response.results
             .map { it.toMediaItem(mediaType) }
             .distinctBy { "${it.mediaType.name}_${it.id}" }
+
+        val items = if (categoryId.startsWith("kids_")) {
+            val filter = kidsContentFilter.get()
+            filter.ensureAgesCached(rawItems)
+            rawItems.filter(filter.state.value::allows)
+        } else {
+            rawItems
+        }
+
         if (items.isNotEmpty()) {
             cacheItems(items)
         }
@@ -2015,6 +2339,11 @@ class MediaRepository @Inject constructor(
                 CollectionSourceKind.TMDB_WATCH_PROVIDER -> loadCollectionWatchProviderRefs(source, limit)
                 CollectionSourceKind.CURATED_IDS -> loadCollectionCuratedRefs(source, limit)
                 CollectionSourceKind.MDBLIST_PUBLIC -> loadCollectionMdblistPublicRefs(source, limit)
+                CollectionSourceKind.TMDB_DISCOVER -> loadCollectionDiscoverRefs(source, limit)
+                CollectionSourceKind.TMDB_LIST -> loadCollectionTmdbListRefs(source, limit)
+                CollectionSourceKind.TRAKT_LIST -> source.traktListId?.takeIf { it.isNotBlank() }?.let { listId ->
+                    loadTraktCatalogRefs(sourceUrl = "https://trakt.tv/lists/$listId").take(limit)
+                }.orEmpty()
             }
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
@@ -2081,6 +2410,89 @@ class MediaRepository @Inject constructor(
         }.take(limit)
     }
 
+    private fun getActiveKidsLevelAndCert(): Pair<KidsAgeLevel?, String?> {
+        val filter = runCatching { kidsContentFilter.get() }.getOrNull() ?: return null to null
+        val kidsLevel = filter.state.value.level ?: return null to null
+        val certLte = when (kidsLevel) {
+            KidsAgeLevel.LITTLE_KIDS -> "L"
+            KidsAgeLevel.OLDER_KIDS -> "10"
+            KidsAgeLevel.PRE_TEENS -> "12"
+            KidsAgeLevel.TEENS -> "14"
+        }
+        return kidsLevel to certLte
+    }
+
+    /** Generic TMDB discover for imported collections (raw TMDB query params). */
+    private suspend fun loadCollectionDiscoverRefs(
+        source: CollectionSourceConfig,
+        limit: Int
+    ): List<Pair<MediaType, Int>> {
+        val isTv = when (source.mediaType?.lowercase(Locale.US)) {
+            "series", "tv", "show" -> true
+            else -> false
+        }
+        val (kidsLevel, certLte) = getActiveKidsLevelAndCert()
+        val isKids = kidsLevel != null
+        val baseParams = source.discoverParams.orEmpty()
+        val params = if (isKids && certLte != null) {
+            baseParams + mapOf(
+                "certification_country" to "BR",
+                "certification.lte" to certLte
+            )
+        } else {
+            baseParams
+        }
+        val sortBy = (source.sortBy ?: "popularity.desc").let { sort ->
+            when {
+                isTv && sort.startsWith("primary_release_date") -> sort.replace("primary_release_date", "first_air_date")
+                !isTv && sort.startsWith("first_air_date") -> sort.replace("first_air_date", "primary_release_date")
+                else -> sort
+            }
+        }
+        return loadPagedTmdbDiscoverRefs(
+            mediaType = if (isTv) MediaType.TV else MediaType.MOVIE,
+            limit = limit
+        ) { page ->
+            tmdbApi.discoverWithParams(
+                mediaType = if (isTv) "tv" else "movie",
+                apiKey = apiKey,
+                params = params,
+                sortBy = sortBy,
+                language = contentLanguage,
+                page = page
+            )
+        }
+    }
+
+    /** Public TMDB list, kept in list order; mixed movie/TV entries. */
+    private suspend fun loadCollectionTmdbListRefs(
+        source: CollectionSourceConfig,
+        limit: Int
+    ): List<Pair<MediaType, Int>> {
+        val listId = source.tmdbListId ?: return emptyList()
+        val refs = LinkedHashSet<Pair<MediaType, Int>>()
+        var page = 1
+        var totalPages = 1
+        while (refs.size < limit && page <= totalPages) {
+            val response = try {
+                tmdbApi.getPublicList(listId, apiKey, language = contentLanguage, page = page)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                break
+            }
+            response.items.forEach { item ->
+                if (item.id <= 0) return@forEach
+                val type = if (item.mediaType.equals("tv", ignoreCase = true)) MediaType.TV else MediaType.MOVIE
+                refs.add(type to item.id)
+            }
+            totalPages = response.totalPages.coerceAtLeast(1)
+            if (response.items.isEmpty()) break
+            page += 1
+        }
+        return refs.take(limit)
+    }
+
     /**
      * TMDB `/collection/{id}` returns the canonical list of films in a franchise
      * (Harry Potter = 1241, LOTR = 119, etc.). We keep sort-by-release-date so
@@ -2118,6 +2530,8 @@ class MediaRepository @Inject constructor(
     ): List<Pair<MediaType, Int>> = coroutineScope {
         val keyword = source.tmdbKeywordId?.toString() ?: return@coroutineScope emptyList()
         val sortBy = source.sortBy ?: "popularity.desc"
+        val (kidsLevel, certLte) = getActiveKidsLevelAndCert()
+        val isKids = kidsLevel != null
         val mt = source.mediaType?.lowercase(Locale.US)
         when (mt) {
             "movie" -> loadPagedTmdbDiscoverRefs(
@@ -2125,10 +2539,12 @@ class MediaRepository @Inject constructor(
                 limit = limit
             ) { page ->
                 tmdbApi.discoverMovies(
-                    apiKey,
+                    apiKey = apiKey,
                     keywords = keyword,
                     sortBy = sortBy,
                     language = contentLanguage,
+                    certificationCountry = if (isKids) "BR" else null,
+                    certificationLte = if (isKids) certLte else null,
                     page = page
                 )
             }
@@ -2137,10 +2553,12 @@ class MediaRepository @Inject constructor(
                 limit = limit
             ) { page ->
                 tmdbApi.discoverTv(
-                    apiKey,
+                    apiKey = apiKey,
                     keywords = keyword,
                     sortBy = sortBy,
                     language = contentLanguage,
+                    certificationCountry = if (isKids) "BR" else null,
+                    certificationLte = if (isKids) certLte else null,
                     page = page
                 )
             }
@@ -2151,10 +2569,12 @@ class MediaRepository @Inject constructor(
                         limit = limit
                     ) { page ->
                         tmdbApi.discoverMovies(
-                            apiKey,
+                            apiKey = apiKey,
                             keywords = keyword,
                             sortBy = sortBy,
                             language = contentLanguage,
+                            certificationCountry = if (isKids) "BR" else null,
+                            certificationLte = if (isKids) certLte else null,
                             page = page
                         )
                     }
@@ -2165,10 +2585,12 @@ class MediaRepository @Inject constructor(
                         limit = limit
                     ) { page ->
                         tmdbApi.discoverTv(
-                            apiKey,
+                            apiKey = apiKey,
                             keywords = keyword,
                             sortBy = sortBy,
                             language = contentLanguage,
+                            certificationCountry = if (isKids) "BR" else null,
+                            certificationLte = if (isKids) certLte else null,
                             page = page
                         )
                     }
@@ -2182,14 +2604,17 @@ class MediaRepository @Inject constructor(
      * Streaming-service trending via `with_watch_providers`. Used for services
      * that don't have a dedicated addon catalog (Apple TV+, Paramount+, Hulu,
      * Peacock). Region defaults to US if not provided — TMDB requires a region
-     * for watch-provider queries.
+     * for watch-provider queries. For kids profiles, region is pinned to BR with
+     * Brazilian age certification (ClassInd) requested directly on TMDB discover.
      */
     private suspend fun loadCollectionWatchProviderRefs(
         source: CollectionSourceConfig,
         limit: Int
     ): List<Pair<MediaType, Int>> {
         val providerId = source.tmdbWatchProviderId ?: return emptyList()
-        val region = source.watchRegion?.takeIf { it.isNotBlank() } ?: "US"
+        val (kidsLevel, certLte) = getActiveKidsLevelAndCert()
+        val isKids = kidsLevel != null
+        val region = if (isKids) "BR" else (source.watchRegion?.takeIf { it.isNotBlank() } ?: "US")
         val sortBy = source.sortBy ?: "popularity.desc"
         return when (source.mediaType?.lowercase(Locale.US)) {
             "movie" -> loadPagedTmdbDiscoverRefs(
@@ -2197,11 +2622,13 @@ class MediaRepository @Inject constructor(
                 limit = limit
             ) { page ->
                 tmdbApi.discoverMovies(
-                    apiKey,
+                    apiKey = apiKey,
                     watchProviders = providerId,
                     watchRegion = region,
                     sortBy = sortBy,
                     language = contentLanguage,
+                    certificationCountry = if (isKids) "BR" else null,
+                    certificationLte = if (isKids) certLte else null,
                     page = page
                 )
             }
@@ -2210,11 +2637,13 @@ class MediaRepository @Inject constructor(
                 limit = limit
             ) { page ->
                 tmdbApi.discoverTv(
-                    apiKey,
+                    apiKey = apiKey,
                     watchProviders = providerId,
                     watchRegion = region,
                     sortBy = sortBy,
                     language = contentLanguage,
+                    certificationCountry = if (isKids) "BR" else null,
+                    certificationLte = if (isKids) certLte else null,
                     page = page
                 )
             }
@@ -2257,16 +2686,20 @@ class MediaRepository @Inject constructor(
     ): List<Pair<MediaType, Int>> {
         val genreId = source.tmdbGenreId ?: return emptyList()
         val sortBy = source.sortBy ?: "popularity.desc"
+        val (kidsLevel, certLte) = getActiveKidsLevelAndCert()
+        val isKids = kidsLevel != null
         return when (source.mediaType?.lowercase(Locale.US)) {
             "movie" -> loadPagedTmdbDiscoverRefs(
                 mediaType = MediaType.MOVIE,
                 limit = limit
             ) { page ->
                 tmdbApi.discoverMovies(
-                    apiKey,
+                    apiKey = apiKey,
                     genres = genreId.toString(),
                     sortBy = sortBy,
                     language = contentLanguage,
+                    certificationCountry = if (isKids) "BR" else null,
+                    certificationLte = if (isKids) certLte else null,
                     page = page
                 )
             }
@@ -2275,10 +2708,12 @@ class MediaRepository @Inject constructor(
                 limit = limit
             ) { page ->
                 tmdbApi.discoverTv(
-                    apiKey,
+                    apiKey = apiKey,
                     genres = genreId.toString(),
                     sortBy = sortBy,
                     language = contentLanguage,
+                    certificationCountry = if (isKids) "BR" else null,
+                    certificationLte = if (isKids) certLte else null,
                     page = page
                 )
             }
@@ -2292,16 +2727,20 @@ class MediaRepository @Inject constructor(
     ): List<Pair<MediaType, Int>> {
         val personId = source.tmdbPersonId ?: return emptyList()
         val sortBy = source.sortBy ?: "popularity.desc"
+        val (kidsLevel, certLte) = getActiveKidsLevelAndCert()
+        val isKids = kidsLevel != null
         return when (source.mediaType?.lowercase(Locale.US)) {
             "movie" -> loadPagedTmdbDiscoverRefs(
                 mediaType = MediaType.MOVIE,
                 limit = limit
             ) { page ->
                 tmdbApi.discoverMovies(
-                    apiKey,
+                    apiKey = apiKey,
                     crew = personId.toString(),
                     sortBy = sortBy,
                     language = contentLanguage,
+                    certificationCountry = if (isKids) "BR" else null,
+                    certificationLte = if (isKids) certLte else null,
                     page = page
                 )
             }
@@ -2310,10 +2749,12 @@ class MediaRepository @Inject constructor(
                 limit = limit
             ) { page ->
                 tmdbApi.discoverTv(
-                    apiKey,
+                    apiKey = apiKey,
                     people = personId.toString(),
                     sortBy = sortBy,
                     language = contentLanguage,
+                    certificationCountry = if (isKids) "BR" else null,
+                    certificationLte = if (isKids) certLte else null,
                     page = page
                 )
             }
@@ -2788,7 +3229,7 @@ class MediaRepository @Inject constructor(
             val details = detailsDeferred.await()
             val imdbId = externalIdsDeferred.await()?.imdbId?.also { cacheImdbId(MediaType.MOVIE, movieId, it) }
             val imdbRating = imdbId?.let { getImdbRating(MediaType.MOVIE, movieId, it) }
-            details.toMediaItem().copy(imdbRating = imdbRating.orEmpty())
+            details.toMediaItem(contentLanguage).copy(imdbRating = imdbRating.orEmpty())
         }
         cacheFullDetailsItem(item)
         return item
@@ -2817,7 +3258,7 @@ class MediaRepository @Inject constructor(
             val details = detailsDeferred.await()
             val imdbId = externalIdsDeferred.await()?.imdbId?.also { cacheImdbId(MediaType.TV, tvId, it) }
             val imdbRating = imdbId?.let { getImdbRating(MediaType.TV, tvId, it) }
-            details.toMediaItem().copy(imdbRating = imdbRating.orEmpty())
+            details.toMediaItem(contentLanguage).copy(imdbRating = imdbRating.orEmpty())
         }
         cacheFullDetailsItem(item)
         return item
@@ -3025,6 +3466,11 @@ class MediaRepository @Inject constructor(
         return if (logoCache.containsKey(cacheKey)) getFromCache(logoCache, cacheKey) else null
     }
 
+    fun cacheLogoUrl(mediaType: MediaType, mediaId: Int, logoUrl: String) {
+        val cacheKey = "${mediaType}_logo_$mediaId"
+        logoCache[cacheKey] = CacheEntry(logoUrl, System.currentTimeMillis())
+    }
+
     /** Instant synchronous peek into the in-memory season episodes cache. */
     fun peekCachedSeasonEpisodes(tvId: Int, seasonNumber: Int): List<Episode>? {
         val cacheKey = "tv_${tvId}_season_$seasonNumber"
@@ -3146,9 +3592,35 @@ class MediaRepository @Inject constructor(
         year: Int? = null,
         keywords: String? = null,
         releaseDateLte: String? = null,
-        releaseDateGte: String? = null
+        releaseDateGte: String? = null,
+        primaryReleaseDateLte: String? = null,
+        primaryReleaseDateGte: String? = null,
+        minVoteAverage: Double? = null,
+        maxVoteAverage: Double? = null,
+        certificationCountry: String? = null,
+        certificationLte: String? = null,
+        withoutGenres: String? = null
     ): List<MediaItem> {
-        val response = tmdbApi.discoverMovies(apiKey, genres = genres, sortBy = sortBy, minVoteCount = minVoteCount, page = page, originalLanguage = language, year = year, keywords = keywords, language = contentLanguage, releaseDateLte = releaseDateLte, releaseDateGte = releaseDateGte)
+        val response = tmdbApi.discoverMovies(
+            apiKey,
+            genres = genres,
+            withoutGenres = withoutGenres,
+            sortBy = sortBy,
+            minVoteCount = minVoteCount,
+            page = page,
+            originalLanguage = language,
+            year = year,
+            keywords = keywords,
+            language = contentLanguage,
+            releaseDateLte = releaseDateLte,
+            releaseDateGte = releaseDateGte,
+            primaryReleaseDateLte = primaryReleaseDateLte,
+            primaryReleaseDateGte = primaryReleaseDateGte,
+            minVoteAverage = minVoteAverage,
+            maxVoteAverage = maxVoteAverage,
+            certificationCountry = certificationCountry,
+            certificationLte = certificationLte
+        )
         val items = response.results.map { it.toMediaItem(MediaType.MOVIE) }
         cacheItems(items)
         return items
@@ -3166,12 +3638,76 @@ class MediaRepository @Inject constructor(
         year: Int? = null,
         keywords: String? = null,
         airDateLte: String? = null,
-        airDateGte: String? = null
+        airDateGte: String? = null,
+        firstAirDateLte: String? = null,
+        firstAirDateGte: String? = null,
+        minVoteAverage: Double? = null,
+        maxVoteAverage: Double? = null,
+        withoutGenres: String? = null
     ): List<MediaItem> {
-        val response = tmdbApi.discoverTv(apiKey, genres = genres, sortBy = sortBy, minVoteCount = minVoteCount, page = page, originalLanguage = language, year = year, keywords = keywords, language = contentLanguage, airDateLte = airDateLte, airDateGte = airDateGte)
+        val response = tmdbApi.discoverTv(
+            apiKey,
+            genres = genres,
+            sortBy = sortBy,
+            minVoteCount = minVoteCount,
+            page = page,
+            originalLanguage = language,
+            year = year,
+            keywords = keywords,
+            language = contentLanguage,
+            airDateLte = airDateLte,
+            airDateGte = airDateGte,
+            firstAirDateLte = firstAirDateLte,
+            firstAirDateGte = firstAirDateGte,
+            minVoteAverage = minVoteAverage,
+            maxVoteAverage = maxVoteAverage,
+            withoutGenres = withoutGenres
+        )
         val items = response.results.map { it.toMediaItem(MediaType.TV) }
         cacheItems(items)
         return items
+    }
+
+    /** Titles and known-for rows share one request; optional artwork must not delay them. */
+    suspend fun searchWithPeople(query: String, maxPeople: Int = 3): MediaSearchResults = coroutineScope {
+        val trimmed = query.trim()
+        if (trimmed.isEmpty()) return@coroutineScope MediaSearchResults(emptyList(), emptyList())
+
+        val response = tmdbApi.searchMulti(apiKey, trimmed, language = contentLanguage)
+        val items = response.results
+            .filter { it.mediaType == "movie" || it.mediaType == "tv" }
+            .map { it.toMediaItem(if (it.mediaType == "tv") MediaType.TV else MediaType.MOVIE) }
+            .distinctBy { it.mediaType to it.id }
+        val people = response.results
+            .asSequence()
+            .filter { it.mediaType == "person" && it.id > 0 && !it.name.isNullOrBlank() }
+            .distinctBy { it.id }
+            .sortedByDescending { it.popularity }
+            .take(maxPeople)
+            .toList()
+
+        val rows = people.map { person ->
+            val knownForItems = person.knownFor
+                .asSequence()
+                .filter { it.posterPath != null && (it.mediaType == "movie" || it.mediaType == "tv") }
+                .sortedWith(
+                    compareByDescending<TmdbMediaItem> { it.voteCount }
+                        .thenByDescending { it.popularity }
+                )
+                .map {
+                    it.toMediaItem(
+                        if (it.mediaType == "tv") MediaType.TV else MediaType.MOVIE
+                    )
+                }
+                .distinctBy { "${it.mediaType}_${it.id}" }
+                .take(20)
+                .toList()
+
+            PersonMediaSearchResult(personId = person.id, name = person.name.orEmpty(), items = knownForItems)
+        }
+
+        cacheItems(items + rows.flatMap { it.items })
+        MediaSearchResults(items, rows)
     }
 
     /**
@@ -3657,7 +4193,7 @@ private fun TmdbMediaItem.toMediaItem(defaultType: MediaType): MediaItem {
     )
 }
 
-private fun TmdbMovieDetails.toMediaItem(): MediaItem {
+private fun TmdbMovieDetails.toMediaItem(contentLanguage: String? = null): MediaItem {
     val year = releaseDate?.take(4) ?: ""
     val hours = (runtime ?: 0) / 60
     val minutes = (runtime ?: 0) % 60
@@ -3672,6 +4208,7 @@ private fun TmdbMovieDetails.toMediaItem(): MediaItem {
         releaseDate = formatDate(releaseDate ?: ""),
         duration = duration,
         rating = if (adult) "R" else "PG-13",
+        contentRating = ContentRating.forMovie(releaseDates, contentLanguage),
         imdbRating = "",
         tmdbRating = formatTmdbRating(voteAverage),
         mediaType = MediaType.MOVIE,
@@ -3685,7 +4222,7 @@ private fun TmdbMovieDetails.toMediaItem(): MediaItem {
     )
 }
 
-private fun TmdbTvDetails.toMediaItem(): MediaItem {
+private fun TmdbTvDetails.toMediaItem(contentLanguage: String? = null): MediaItem {
     val year = firstAirDate?.take(4) ?: ""
     val runtime = episodeRunTime.firstOrNull() ?: 45
     val duration = "${runtime}m"
@@ -3706,6 +4243,7 @@ private fun TmdbTvDetails.toMediaItem(): MediaItem {
         year = year,
         releaseDate = formatDate(firstAirDate ?: ""),
         duration = duration,
+        contentRating = ContentRating.forTv(contentRatings, contentLanguage),
         imdbRating = "",
         tmdbRating = formatTmdbRating(voteAverage),
         mediaType = MediaType.TV,

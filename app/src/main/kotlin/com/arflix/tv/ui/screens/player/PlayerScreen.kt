@@ -151,6 +151,9 @@ import com.arflix.tv.ui.components.Toast
 import com.arflix.tv.ui.components.ToastType
 import com.arflix.tv.ui.components.NextEpisodeOverlay
 import com.arflix.tv.ui.components.StreamSelector
+import com.arflix.tv.ui.screens.player.mobile.ArvioMobilePlayer
+import com.arflix.tv.ui.screens.player.common.PlayerSystemBarsEffect
+import com.arflix.tv.ui.screens.player.AspectRatioMode
 import com.arflix.tv.ui.components.WaveLoadingDots
 import com.arflix.tv.ui.components.PlaybackQualityBadgeRow
 import com.arflix.tv.ui.components.buildPlaybackBadges
@@ -342,21 +345,12 @@ fun PlayerScreen(
     val allowAudioExceedCodecCapabilities = true
     val allowRendererExceedCodecCapabilities = true
 
-    // Orientation is still handled locally to ensure it is locked as long as this screen is active.
-    // Restoration is safe here because MainActivity now manages the System UI bars globally
-    // based on route, preventing them from flickering during navigation transitions.
+    // Orientation is locked in landscape while playback is active.
+    // MainActivity manages restoring portrait/full_user when navigating away from player routes,
+    // which prevents the phone from jarringly rotating to portrait during next-episode transitions.
     DisposableEffect(activity) {
-        val previousOrientation = activity?.requestedOrientation
         activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-        onDispose {
-            if (previousOrientation != null) {
-                if (deviceType.isTouchDevice() && (previousOrientation == ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE || previousOrientation == ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE)) {
-                    activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-                } else {
-                    activity.requestedOrientation = previousOrientation
-                }
-            }
-        }
+        onDispose { }
     }
 
     // Initialize Cast SDK once on mobile entry. No-op on TV (CastState.NotAvailable).
@@ -418,6 +412,7 @@ fun PlayerScreen(
     // advance to the next episode. Gated on the existing autoPlayNext profile setting —
     // when disabled we simply stay on the ended frame rather than advancing silently.
     var showNextEpisodePrompt by remember { mutableStateOf(false) }
+    var nextEpisodePromptDismissed by remember(seasonNumber, episodeNumber) { mutableStateOf(false) }
     var pendingNextSeason by remember { mutableIntStateOf(0) }
     var pendingNextEpisode by remember { mutableIntStateOf(0) }
     var pendingNextAddonId by remember { mutableStateOf<String?>(null) }
@@ -550,6 +545,7 @@ fun PlayerScreen(
 
     // Picture-in-Picture state
     var isInPipMode by remember { mutableStateOf(false) }
+    var currentPlaybackSpeed by remember { mutableFloatStateOf(1.0f) }
 
     // Render Material ImageVectors into bitmaps for PiP RemoteActions — same icon pack, no XML files.
     val pipDensity = LocalDensity.current
@@ -2457,19 +2453,25 @@ fun PlayerScreen(
             if (exoPlayer.playbackState == Player.STATE_ENDED &&
                 mediaType == MediaType.TV &&
                 !showNextEpisodePrompt &&
+                !nextEpisodePromptDismissed &&
                 !showSourceMenu &&
                 !showSubtitleMenu &&
                 uiState.error == null
             ) {
                 if (seasonNumber != null && episodeNumber != null && uiState.autoPlayNext) {
-                    val selected = uiState.selectedStream
-                    pendingNextSeason = seasonNumber
-                    pendingNextEpisode = episodeNumber + 1
-                    pendingNextAddonId = selected?.addonId?.takeIf { it.isNotBlank() }
-                    pendingNextSourceName = selected?.source?.takeIf { it.isNotBlank() }
-                    pendingNextBingeGroup = selected?.behaviorHints?.bingeGroup?.takeIf { it.isNotBlank() }
-                    nextEpisodePromptButton = 0
-                    showNextEpisodePrompt = true
+                    val nextEp = resolveNextEpisodeNumber(episodeNumber, uiState.seasonEpisodes)
+                    val hasNext = uiState.seasonEpisodes.isEmpty() || uiState.seasonEpisodes.any { it.episodeNumber > episodeNumber }
+                    if (hasNext) {
+                        val selected = uiState.selectedStream
+                        pendingNextSeason = seasonNumber
+                        pendingNextEpisode = nextEp
+                        pendingNextAddonId = selected?.addonId?.takeIf { it.isNotBlank() }
+                        pendingNextSourceName = selected?.source?.takeIf { it.isNotBlank() }
+                        pendingNextBingeGroup = selected?.behaviorHints?.bingeGroup?.takeIf { it.isNotBlank() }
+                        pendingNextDescription = selected?.description?.takeIf { it.isNotBlank() }
+                        nextEpisodePromptButton = 0
+                        showNextEpisodePrompt = true
+                    }
                 }
             }
 
@@ -2565,7 +2567,7 @@ fun PlayerScreen(
         }
     }
 
-    // Request focus on the container when not showing controls
+    // Request focus on the container when not showing controls or error is showing
     LaunchedEffect(showControls, showSubtitleMenu, showSourceMenu, showNextEpisodePrompt, uiState.error) {
         if (!showControls && !showSubtitleMenu && !showSourceMenu && !showNextEpisodePrompt && uiState.error == null) {
             delay(100)
@@ -2651,35 +2653,7 @@ fun PlayerScreen(
             .background(Color.Black)
             .focusRequester(containerFocusRequester)
             .focusable()
-            .then(
-                if (isTouchDevice) {
-                    // isCasting is a key so the handler restarts when casting changes,
-                    // picking up the updated queueControlsSeek lambda.
-                    Modifier.pointerInput(isCasting) {
-                        detectTapGestures(
-                            onTap = {
-                                if (uiState.error == null && !showSubtitleMenu && !showSourceMenu) {
-                                    showControls = !showControls
-                                }
-                            },
-                            onDoubleTap = { offset ->
-                                if (uiState.error == null && !showSubtitleMenu && !showSourceMenu) {
-                                    val halfWidth = size.width / 2
-                                    if (offset.x < halfWidth) {
-                                        // Double-tap left side: rewind 10 seconds
-                                        queueControlsSeek(-10_000L)
-                                    } else {
-                                        // Double-tap right side: forward 10 seconds
-                                        queueControlsSeek(10_000L)
-                                    }
-                                }
-                            }
-                        )
-                    }
-                } else {
-                    Modifier
-                }
-            )
+            .then(Modifier)
             .onKeyEvent { event ->
                 if (event.type == KeyEventType.KeyDown) {
                     // Fire TV / Bluetooth media remote keys. These must be handled at the
@@ -2724,9 +2698,10 @@ fun PlayerScreen(
                             // current episode. No-op for movies (there is no next).
                             if (mediaType == MediaType.TV && seasonNumber != null && episodeNumber != null) {
                                 val selected = uiState.selectedStream
+                                val nextEp = resolveNextEpisodeNumber(episodeNumber, uiState.seasonEpisodes)
                                 onPlayNext(
                                     seasonNumber,
-                                    episodeNumber + 1,
+                                    nextEp,
                                     selected?.addonId?.takeIf { it.isNotBlank() },
                                     selected?.source?.takeIf { it.isNotBlank() },
                                     selected?.behaviorHints?.bingeGroup?.takeIf { it.isNotBlank() },
@@ -2739,9 +2714,10 @@ fun PlayerScreen(
                             // Jump to previous episode for TV series. Movies: no-op.
                             if (mediaType == MediaType.TV && seasonNumber != null && episodeNumber != null && episodeNumber > 1) {
                                 val selected = uiState.selectedStream
+                                val prevEp = resolvePrevEpisodeNumber(episodeNumber, uiState.seasonEpisodes)
                                 onPlayNext(
                                     seasonNumber,
-                                    episodeNumber - 1,
+                                    prevEp,
                                     selected?.addonId?.takeIf { it.isNotBlank() },
                                     selected?.source?.takeIf { it.isNotBlank() },
                                     selected?.behaviorHints?.bingeGroup?.takeIf { it.isNotBlank() },
@@ -2754,16 +2730,18 @@ fun PlayerScreen(
                     }
 
                     if (showNextEpisodePrompt) {
-                        return@onKeyEvent when (event.key) {
-                            Key.DirectionLeft -> {
+                        val isSelect = event.key in listOf(Key.Enter, Key.DirectionCenter, Key.NumPadEnter) ||
+                            event.nativeKeyEvent.keyCode in listOf(23, 66, 160, 96)
+                        return@onKeyEvent when {
+                            event.key == Key.DirectionLeft -> {
                                 nextEpisodePromptButton = 0
                                 true
                             }
-                            Key.DirectionRight -> {
+                            event.key == Key.DirectionRight -> {
                                 nextEpisodePromptButton = 1
                                 true
                             }
-                            Key.Enter, Key.DirectionCenter -> {
+                            isSelect -> {
                                 showNextEpisodePrompt = false
                                 if (nextEpisodePromptButton == 0) {
                                     onPlayNext(
@@ -2774,11 +2752,16 @@ fun PlayerScreen(
                                         pendingNextBingeGroup,
                                         pendingNextDescription
                                     )
+                                } else {
+                                    nextEpisodePromptDismissed = true
+                                    onBack()
                                 }
                                 true
                             }
-                            Key.Back, Key.Escape -> {
+                            event.key == Key.Back || event.key == Key.Escape || event.nativeKeyEvent.keyCode == 4 -> {
                                 showNextEpisodePrompt = false
+                                nextEpisodePromptDismissed = true
+                                onBack()
                                 true
                             }
                             else -> true
@@ -3269,9 +3252,8 @@ fun PlayerScreen(
             }
         }
 
-        // Skip intro/recap overlay — only after playback has started to avoid showing
-        // on the loading screen (background art + pulsing logo).
-        if (hasPlaybackStarted) {
+        // Skip intro/recap overlay (TV only — Mobile player renders its own touch button)
+        if (hasPlaybackStarted && !isTouchDevice) {
             val activeSkip = uiState.activeSkipInterval
             SkipIntroButton(
                 interval = activeSkip,
@@ -3396,9 +3378,227 @@ fun PlayerScreen(
             }
         }
 
-        // Netflix-style Controls Overlay
-        AnimatedVisibility(
-            visible = hasPlaybackStarted && showControls && !showSubtitleMenu && !showSourceMenu && !isInPipMode,
+        // Mobile Player Overlay (Phone & Tablet Touch Devices)
+        if (isTouchDevice && !isInPipMode) {
+            ArvioMobilePlayer(
+                uiState = uiState,
+                isPlaying = isPlaying,
+                isBuffering = isBuffering,
+                hasPlaybackStarted = hasPlaybackStarted,
+                currentPositionMs = currentPosition,
+                durationMs = duration,
+                bufferedPositionMs = exoPlayer.bufferedPosition,
+                audioTracks = audioTracks,
+                selectedAudioIndex = selectedAudioIndex,
+                currentPlaybackSpeed = currentPlaybackSpeed,
+                aspectModeLabel = aspectModeLabel,
+                isCasting = isCasting,
+                showCastButton = castAvailable && !streamNeedsHeaders,
+                showPipButton = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O,
+                seekPreviewFrame = null,
+                onScrubPreviewPosition = { position ->
+                    if (position != null) {
+                        scrubPreviewPosition = position
+                        isControlScrubbing = true
+                    } else {
+                        commitControlsSeekNow()
+                    }
+                },
+                onTogglePlayPause = {
+                    if (isCasting) {
+                        if (castManager.isRemotePlaying()) castManager.pause() else castManager.play()
+                    } else {
+                        if (isPlaying) exoPlayer.pause() else exoPlayer.play()
+                        isPlaying = exoPlayer.isPlaying
+                        isBuffering = exoPlayer.playbackState == androidx.media3.common.Player.STATE_BUFFERING && exoPlayer.playWhenReady
+                    }
+                },
+                onSeekTo = { posMs ->
+                    if (isCasting) castManager.seekTo(posMs) else exoPlayer.seekTo(posMs)
+                    currentPosition = posMs
+                },
+                onRewind10 = {
+                    queueControlsSeek(-10_000L)
+                    commitControlsSeekNow()
+                },
+                onForward10 = {
+                    queueControlsSeek(10_000L)
+                    commitControlsSeekNow()
+                },
+                onCycleAspectRatio = cycleAspectRatio,
+                onSelectAspectRatio = { mode ->
+                    playerResizeMode = AspectRatioMode.fromLabel(mode).resizeMode
+                    aspectIndicatorTrigger++
+                },
+                onSelectEpisode = { episode ->
+                    val selected = uiState.selectedStream
+                    onPlayNext(
+                        episode.seasonNumber,
+                        episode.episodeNumber,
+                        selected?.addonId?.takeIf { it.isNotBlank() },
+                        selected?.source?.takeIf { it.isNotBlank() },
+                        selected?.behaviorHints?.bingeGroup?.takeIf { it.isNotBlank() },
+                        selected?.description?.takeIf { it.isNotBlank() }
+                    )
+                },
+                onSelectSource = { stream ->
+                    userSelectedSourceManually = true
+                    playbackIssueReported = false
+                    startupRecoverAttempted = false
+                    startupHardFailureReported = false
+                    startupSameSourceRetryCount = 0
+                    startupSameSourceRefreshAttempted = false
+                    startupUrlLock = null
+                    rebufferRecoverAttempted = false
+                    longRebufferCount = 0
+                    viewModel.selectStream(stream, exoPlayer.currentPosition)
+                },
+                onSelectAudioTrack = { track ->
+                    userPickedAudioForStream = true
+                    applyAudioTrackSelection(exoPlayer, track, audioTracks)?.let {
+                        selectedAudioIndex = it
+                    }
+                },
+                onSelectSubtitleTrack = { sub ->
+                    if (sub == null) {
+                        viewModel.disableSubtitles()
+                    } else {
+                        viewModel.selectSubtitle(sub)
+                    }
+                },
+                onSelectPlaybackSpeed = { speed ->
+                    currentPlaybackSpeed = speed
+                    exoPlayer.setPlaybackSpeed(speed)
+                },
+                onSkipIntro = {
+                    val target = (uiState.activeSkipInterval?.endMs ?: (currentPosition + 85_000L)) + 500L
+                    if (isCasting) castManager.seekTo(target) else exoPlayer.seekTo(target)
+                    currentPosition = target
+                    viewModel.dismissSkipInterval()
+                },
+                onSkipOutro = {
+                    val selected = uiState.selectedStream
+                    val nextEp = resolveNextEpisodeNumber(episodeNumber, uiState.seasonEpisodes)
+                    onPlayNext(
+                        seasonNumber ?: 1,
+                        nextEp,
+                        selected?.addonId?.takeIf { it.isNotBlank() },
+                        selected?.source?.takeIf { it.isNotBlank() },
+                        selected?.behaviorHints?.bingeGroup?.takeIf { it.isNotBlank() },
+                        selected?.description?.takeIf { it.isNotBlank() }
+                    )
+                },
+                onPlayNextEpisode = {
+                    val selected = uiState.selectedStream
+                    val nextEp = resolveNextEpisodeNumber(episodeNumber, uiState.seasonEpisodes)
+                    onPlayNext(
+                        seasonNumber ?: 1,
+                        nextEp,
+                        selected?.addonId?.takeIf { it.isNotBlank() },
+                        selected?.source?.takeIf { it.isNotBlank() },
+                        selected?.behaviorHints?.bingeGroup?.takeIf { it.isNotBlank() },
+                        selected?.description?.takeIf { it.isNotBlank() }
+                    )
+                },
+                canPlayNextEpisode = mediaType == MediaType.TV && seasonNumber != null && episodeNumber != null && (
+                    uiState.seasonEpisodes.isEmpty() || uiState.seasonEpisodes.any { it.episodeNumber > episodeNumber }
+                ),
+                onDismissNextEpisode = {
+                    showNextEpisodePrompt = false
+                },
+                onEnterPip = enterPipMode,
+                onOpenCastChooser = {
+                    if (isCasting) {
+                        castManager.disconnect()
+                    } else {
+                        val dialog = androidx.mediarouter.app.MediaRouteChooserDialog(context)
+                        dialog.routeSelector = castManager.getRouteSelector()
+                        dialog.show()
+                    }
+                },
+                onRetryPlayback = {
+                    viewModel.retry()
+                },
+                onReloadStreams = {
+                    viewModel.reloadStreams()
+                },
+                onUpdateAutoplay = { enabled ->
+                    viewModel.setAutoPlayNext(enabled)
+                },
+                onUpdateAutoSkipIntro = { enabled ->
+                    viewModel.setAutoSkipIntro(enabled)
+                },
+                onUpdateAutoSkipOutro = { enabled ->
+                    viewModel.setAutoSkipOutro(enabled)
+                },
+                onUpdateAudioDelay = { delayMs ->
+                    viewModel.setAudioDelayMs(delayMs)
+                },
+                onUpdateVolumeNormalization = { enabled ->
+                    viewModel.setAudioNormalization(enabled)
+                },
+                onVolumeBoostChange = { db ->
+                    viewModel.setVolumeBoostDb(db)
+                },
+                onToggleLiveAudioTranslation = {
+                    viewModel.toggleLiveAudioTranslation()
+                },
+                onFindBestMatch = {
+                    viewModel.runFindBestMatch()
+                },
+                onActivateAiTranslation = {
+                    viewModel.activateAiTranslation()
+                },
+                subtitleDelayMs = subtitleSyncOffsetMs,
+                onUpdateSubtitleDelay = { delayMs ->
+                    subtitleSyncOffsetMs = delayMs
+                },
+                subtitleSizePct = subtitleSizePct,
+                onUpdateSubtitleSize = { sizePct ->
+                    subtitleSizePct = sizePct.coerceIn(50, 250)
+                },
+                subtitleVerticalPct = subtitleVerticalPct,
+                onUpdateSubtitleVerticalPosition = { verticalPct ->
+                    subtitleVerticalPct = verticalPct.coerceIn(0, 50)
+                },
+                onUpdateSubtitleColor = { colorHex ->
+                    viewModel.setSubtitleColorPref(when (colorHex.lowercase()) {
+                        "#ffe066" -> "Yellow"
+                        "#66d9ff" -> "Cyan"
+                        "#ff6666" -> "Red"
+                        else -> "White"
+                    })
+                },
+                onUpdateSubtitlePosition = { pos ->
+                    viewModel.setSubtitleOffsetPref(if (pos == "top") "High" else "Bottom")
+                },
+                onUpdateSubtitleStyle = { style ->
+                    viewModel.setSubtitleStylePref(style)
+                },
+                onUpdateSubtitleFont = { font ->
+                    viewModel.setSubtitleFontPref(font)
+                },
+                onUpdateSubtitleStylized = { stylized ->
+                    viewModel.setSubtitleStylizedPref(stylized)
+                },
+                onUpdateSubtitlePreload = { enabled ->
+                    viewModel.setSubtitlePreloadEnabled(enabled)
+                },
+                onUpdateFilterSubtitlesByLanguage = { enabled ->
+                    viewModel.setFilterSubtitlesByLanguage(enabled)
+                },
+                onUpdateSubtitleRemoveHearingImpaired = { enabled ->
+                    viewModel.setSubtitleRemoveHearingImpaired(enabled)
+                },
+                onBack = onBack
+            )
+        }
+
+        // TV Player Controls & Menus (TV Devices Only)
+        if (!isTouchDevice && !isInPipMode) {
+            // Netflix-style Controls Overlay
+            AnimatedVisibility(
+                visible = hasPlaybackStarted && showControls && !showSubtitleMenu && !showSourceMenu && !isInPipMode,
             enter = fadeIn(androidx.compose.animation.core.tween(150)),
             exit = fadeOut(androidx.compose.animation.core.tween(200))
         ) {
@@ -3733,9 +3933,10 @@ fun PlayerScreen(
                                     val season = seasonNumber ?: return@PlayerIconButton
                                     val episode = episodeNumber ?: return@PlayerIconButton
                                     val selected = uiState.selectedStream
+                                    val nextEp = resolveNextEpisodeNumber(episode, uiState.seasonEpisodes)
                                     onPlayNext(
                                         season,
-                                        episode + 1,
+                                        nextEp,
                                         selected?.addonId?.takeIf { it.isNotBlank() },
                                         selected?.source?.takeIf { it.isNotBlank() },
                                         selected?.behaviorHints?.bingeGroup?.takeIf { it.isNotBlank() },
@@ -3981,6 +4182,7 @@ fun PlayerScreen(
                 }
             }
         )
+        }
 
         // Post-episode "Up Next" prompt (issue #86). Shown when a TV episode ends and
         // autoPlayNext is enabled. 10-second countdown auto-advances, or the user can
@@ -3994,7 +4196,8 @@ fun PlayerScreen(
             // episode's metadata would require an extra TMDB round-trip during playback.
             // Fall back to a generic "Episode N" label — the show title, S/E number, and
             // backdrop image still give users enough context to decide Continue/Cancel.
-            episodeTitle = "Episode $pendingNextEpisode",
+            episodeTitle = uiState.seasonEpisodes.firstOrNull { it.episodeNumber == pendingNextEpisode }?.name
+                ?: "Episódio $pendingNextEpisode",
             seasonNumber = pendingNextSeason,
             episodeNumber = pendingNextEpisode,
             episodeImage = uiState.backdropUrl,
@@ -4014,7 +4217,8 @@ fun PlayerScreen(
             },
             onCancel = {
                 showNextEpisodePrompt = false
-                // Stay on the ended frame — user can hit Back to leave the player.
+                nextEpisodePromptDismissed = true
+                onBack()
             }
         )
 
@@ -6433,5 +6637,25 @@ private fun guessCastMimeType(url: String, stream: StreamSource? = null): String
         isTelegram || filename.endsWith(".mkv") -> "video/x-matroska"
         filename.endsWith(".mp4") -> "video/mp4"
         else -> "video/mp4"
+    }
+}
+
+private fun resolveNextEpisodeNumber(currentEp: Int?, episodes: List<com.arflix.tv.data.model.Episode>): Int {
+    if (currentEp == null) return 1
+    val currentIdx = episodes.indexOfFirst { it.episodeNumber == currentEp }
+    return if (currentIdx >= 0 && currentIdx + 1 < episodes.size) {
+        episodes[currentIdx + 1].episodeNumber
+    } else {
+        episodes.firstOrNull { it.episodeNumber > currentEp }?.episodeNumber ?: (currentEp + 1)
+    }
+}
+
+private fun resolvePrevEpisodeNumber(currentEp: Int?, episodes: List<com.arflix.tv.data.model.Episode>): Int {
+    if (currentEp == null) return 1
+    val currentIdx = episodes.indexOfFirst { it.episodeNumber == currentEp }
+    return if (currentIdx > 0) {
+        episodes[currentIdx - 1].episodeNumber
+    } else {
+        episodes.lastOrNull { it.episodeNumber < currentEp }?.episodeNumber ?: (currentEp - 1).coerceAtLeast(1)
     }
 }

@@ -114,7 +114,9 @@ data class HomeUiState(
     val showAppUpdateDialog: Boolean = false,
     val hasUpdateBadge: Boolean = false,
     val categoryHasMoreMap: Map<String, Boolean> = emptyMap(),
-    val smoothScrolling: Boolean = false
+    val categoryLoadingMap: Map<String, Boolean> = emptyMap(),
+    val smoothScrolling: Boolean = false,
+    val netflixHomeStyle: Boolean = true
 )
 
 @androidx.compose.runtime.Immutable
@@ -146,6 +148,7 @@ class HomeViewModel @Inject constructor(
     private val launcherContinueWatchingRepository: LauncherContinueWatchingRepository,
     private val realtimeSyncManager: com.arflix.tv.data.repository.RealtimeSyncManager,
     private val profileManager: ProfileManager,
+    private val profileRepository: com.arflix.tv.data.repository.ProfileRepository,
     private val appUpdateRepository: com.arflix.tv.updater.AppUpdateRepository,
     private val apkDownloader: com.arflix.tv.updater.ApkDownloader,
     private val updatePreferences: com.arflix.tv.updater.UpdatePreferences,
@@ -153,8 +156,72 @@ class HomeViewModel @Inject constructor(
     private val youTubeExtractor: com.arflix.tv.data.api.InAppYouTubeExtractor,
     private val fenixRepository: FenixRepository,
     private val telegramRepository: TelegramRepository,
+    private val kidsContentFilter: com.arflix.tv.data.repository.KidsContentFilter,
     @ApplicationContext private val context: Context
 ) : ViewModel() {
+    val kidsFilterState: StateFlow<com.arflix.tv.data.repository.KidsContentFilter.State> = kidsContentFilter.state
+
+    fun applyKidsFilter(state: HomeUiState, kids: com.arflix.tv.data.repository.KidsContentFilter.State): HomeUiState {
+        if (!kids.isActive) return state
+        val categories = kidsContentFilter.filterCategories(
+            state.categories.filterNot { it.id == FAVORITE_TV_CATEGORY_ID },
+            kids
+        )
+        val hero = state.heroItem?.takeIf(kids::allows)
+            ?: categories.asSequence().flatMap { it.items }.firstOrNull { !it.isPlaceholder }
+        val sameHero = hero == state.heroItem
+        return state.copy(
+            categories = categories,
+            heroItem = hero,
+            heroLogoUrl = state.heroLogoUrl.takeIf { sameHero },
+            heroTrailerKey = state.heroTrailerKey.takeIf { sameHero },
+            heroOverviewOverride = state.heroOverviewOverride.takeIf { sameHero },
+            previousHeroItem = state.previousHeroItem?.takeIf(kids::allows)
+        )
+    }
+
+    fun filterForKids(items: List<MediaItem>, kids: com.arflix.tv.data.repository.KidsContentFilter.State): List<MediaItem> =
+        kidsContentFilter.filter(items, kids)
+
+    fun cacheItem(item: MediaItem) {
+        mediaRepository.cacheItem(item)
+    }
+
+    fun cacheLogoUrl(mediaType: MediaType, mediaId: Int, logoUrl: String) {
+        mediaRepository.cacheLogoUrl(mediaType, mediaId, logoUrl)
+    }
+
+    suspend fun loadViewAllPreview(item: MediaItem): MediaItem = withContext(Dispatchers.IO) {
+        if (!isActionableMediaItem(item) || isIptvItem(item) || isCollectionItem(item)) return@withContext item
+        val cached = getCachedHeroDetailsSnapshot(item)
+        val snapshot = if (cached?.fullyLoaded == true) cached else loadHeroDetailsSnapshot(item) ?: cached
+        if (snapshot != null) {
+            heroDetailsCache[heroDetailsKey(item)] = snapshot
+            item.withHeroDetails(snapshot)
+        } else item
+    }
+
+    fun onViewAllVisiblePosition(categoryId: String, lastVisibleItemIndex: Int, lookAheadItems: Int) {
+        if (lastVisibleItemIndex < 0) return
+        val category = _uiState.value.categories.firstOrNull { it.id == categoryId } ?: return
+        val index = KidsPaging.rawIndex(
+            category.items, kidsContentFilter.state.value, lastVisibleItemIndex, lookAheadItems
+        )
+        val realCount = category.items.count { !it.isPlaceholder }
+        val threshold = lookAheadItems.coerceAtLeast(12)
+        if (index >= realCount - threshold) {
+            loadNextPageForCategory(categoryId)
+        }
+    }
+
+    fun topUpKidsCategory(categoryId: String, minVisible: Int = 24) {
+        val category = _uiState.value.categories.firstOrNull { it.id == categoryId } ?: return
+        if (category.items.size >= 120) return
+        if (_uiState.value.categoryHasMoreMap[categoryId] != true) return
+        if (KidsPaging.needsMore(category.items, kidsContentFilter.state.value, minVisible)) {
+            loadNextPageForCategory(categoryId)
+        }
+    }
     private val imageLoader: ImageLoader by lazy(LazyThreadSafetyMode.NONE) {
         context.imageLoader
     }
@@ -441,10 +508,10 @@ class HomeViewModel @Inject constructor(
     }
 
     private fun needsContinueWatchingArtworkRepair(item: ContinueWatchingItem): Boolean {
-        return item.posterPath.isNullOrBlank() ||
+        return item.title.startsWith("Série ") ||
+            item.posterPath.isNullOrBlank() ||
             item.backdropPath.isNullOrBlank() ||
-            item.overview.isBlank() ||
-            item.durationSeconds <= 0L
+            item.overview.isBlank()
     }
 
     private suspend fun repairContinueWatchingMetadataIfNeeded(
@@ -589,6 +656,11 @@ class HomeViewModel @Inject constructor(
             ?: snapshotFromCachedFullItem(item)?.also { heroDetailsCache[key] = it }
     }
 
+    fun getCachedHeroItem(item: MediaItem): MediaItem {
+        val snapshot = getCachedHeroDetailsSnapshot(item) ?: return item
+        return item.withHeroDetails(snapshot)
+    }
+
     private fun applyHeroDetailsSnapshotIfCurrent(item: MediaItem, snapshot: HeroDetailsSnapshot): Boolean {
         val currentHero = _uiState.value.heroItem
         if (currentHero?.id != item.id || currentHero.mediaType != item.mediaType) return false
@@ -673,11 +745,13 @@ class HomeViewModel @Inject constructor(
         }
         if (nonLiveItems.isEmpty()) return emptyList()
 
-        val seasonEpisodesCache = HashMap<Pair<Int, Int>, List<com.arflix.tv.data.model.Episode>?>()
+        // Verifica séries que já estão marcadas localmente como concluídas no Fenix.
+        // Se a série está concluída naquele season/episode ou além, não precisa ser exibida
+        // no Continuar Assistindo enquanto novas temporadas não forem detectadas pelo sb=.
+        val concludedMap = fenixRepository.getConcludedSeries().associateBy { it.seriesId }
 
         return nonLiveItems.mapNotNull { item ->
             if (item.mediaType != MediaType.TV) {
-
                 return@mapNotNull item
             }
 
@@ -687,43 +761,15 @@ class HomeViewModel @Inject constructor(
                 return@mapNotNull item
             }
 
-            val cacheKey = item.id to season
-            val seasonEpisodes = if (seasonEpisodesCache.containsKey(cacheKey)) {
-                seasonEpisodesCache[cacheKey]
-            } else {
-                val fetched = runCatching {
-                    mediaRepository.getSeasonEpisodes(item.id, season)
-                }.getOrNull()
-                seasonEpisodesCache[cacheKey] = fetched
-                fetched
+            val concluded = concludedMap[item.id]
+            if (concluded != null) {
+                // Se o episódio armazenado é igual ou anterior ao ponto concluído, não reexibe
+                if (season < concluded.season || (season == concluded.season && episode <= concluded.episode)) {
+                    return@mapNotNull null
+                }
             }
 
-            // If TMDB fetch failed, keep the item rather than silently dropping it.
-            if (seasonEpisodes == null) {
-                return@mapNotNull item
-            }
-
-            // If TMDB doesn't have episodes for this season yet (e.g., a brand-new
-            // season premiere that Trakt knows about but TMDB hasn't indexed), keep
-            // the item. Trakt's progress API is authoritative for "what to watch next."
-            // The previous code dropped these items, causing shows with new season
-            // premieres to silently disappear from Continue Watching.
-            if (seasonEpisodes.isEmpty()) {
-                return@mapNotNull item // Keep — TMDB may not have the season data yet
-            }
-
-            val matchedEpisode = seasonEpisodes.firstOrNull { it.episodeNumber == episode }
-            if (matchedEpisode == null) {
-                return@mapNotNull item // Keep — episode may not be on TMDB yet
-            }
-
-            if (!isEpisodeAlreadyAired(matchedEpisode.airDate)) {
-                return@mapNotNull null
-            }
-
-            item.copy(
-                episodeTitle = item.episodeTitle ?: matchedEpisode.name
-            )
+            item
         }
     }
 
@@ -2073,12 +2119,42 @@ class HomeViewModel @Inject constructor(
                 val fenixCatalog = fenixRepository.catalog.value
                 Log.i("HomeVM", "🔄 Sincronização concluída. Carregando conteúdo. Movies: ${fenixCatalog.movies.size}, Series: ${fenixCatalog.series.size}")
 
+                val activeProfile = withContext(Dispatchers.IO) { profileRepository.getActiveProfile() }
+                val isKids = activeProfile?.isKidsProfile == true
+                val kidsLevel = activeProfile?.kidsLevel
+
                 val baseCategories = withContext(networkDispatcher) {
-                    mediaRepository.getHomeCategories()
+                    if (isKids) {
+                        mediaRepository.getKidsHomeCategories(kidsLevel)
+                    } else {
+                        mediaRepository.getHomeCategories()
+                    }
                 }
                 
                 val savedCatalogs = withContext(networkDispatcher) {
-                    catalogRepository.getCatalogs()
+                    if (isKids) {
+                        // Para o perfil kids, inclui os serviços de streaming e gêneros apropriados
+                        val allPreinstalled = catalogRepository.getCatalogs()
+                        val allowedServices = setOf(
+                            "Netflix", "Disney+", "Apple TV+", "Prime Video", "HBO Max", "Paramount+", "Peacock", "Discovery+", "Crunchyroll"
+                        )
+                        val maxAge = kidsLevel?.maxAge ?: 10
+                        val allowedGenres = if (maxAge <= 10) {
+                            setOf("Comédia", "Família", "Fantasia", "Animação", "Aventura")
+                        } else {
+                            setOf("Ação", "Aventura", "Comédia", "Família", "Fantasia", "Ficção Científica", "Documentário")
+                        }
+
+                        allPreinstalled.filter { cfg ->
+                            when (cfg.collectionGroup) {
+                                com.arflix.tv.data.model.CollectionGroupKind.SERVICE -> cfg.title in allowedServices || cfg.kind == com.arflix.tv.data.model.CatalogKind.COLLECTION_RAIL
+                                com.arflix.tv.data.model.CollectionGroupKind.GENRE -> cfg.title in allowedGenres || cfg.kind == com.arflix.tv.data.model.CatalogKind.COLLECTION_RAIL
+                                else -> false
+                            }
+                        }
+                    } else {
+                        catalogRepository.getCatalogs()
+                    }
                 }
 
                 // CRITICAL: Populate the savedCatalogById map for pagination tracking
@@ -2100,12 +2176,12 @@ class HomeViewModel @Inject constructor(
                         if (item.mediaType == MediaType.MOVIE) fenixRepository.isMovieAvailable(item.id)
                         else fenixRepository.isSeriesAvailable(item.id)
                     })
-                    // Initialize pagination state for TMDB categories (they load 2 pages initially)
+                    // Initialize pagination state for TMDB categories (they load 1 page initially)
                     // Use getOrPut to PRESERVE lastLoadedPage during background refreshes
                     categoryPaginationStates.getOrPut(id) {
                         CategoryPaginationState(
                             loadedCount = filtered.items.size,
-                            lastLoadedPage = 2,
+                            lastLoadedPage = 1,
                             hasMore = true
                         )
                     }.apply {
@@ -2115,22 +2191,46 @@ class HomeViewModel @Inject constructor(
                 }
 
                 // Assemble final list in user's preferred order
-                val finalCategories = savedCatalogs.mapNotNull { cfg ->
-                    when {
-                        isCollectionTileConfig(cfg) -> null
-                        isCollectionRailConfig(cfg) -> {
-                            val group = cfg.collectionGroup ?: return@mapNotNull null
-                            collectionCategoryById[collectionRowId(group)]
-                        }
-                        else -> {
-                            val cat = baseCategoriesById[cfg.id]
-                            if (cat == null || cat.items.isEmpty()) null else cat
-                        }
+                val finalCategories = if (isKids) {
+                    val kidsList = mutableListOf<Category>()
+                    val validCategories = baseCategoriesById.values.filter { it.items.isNotEmpty() }.toMutableList()
+                    
+                    // Coloca as duas primeiras categorias no topo (Filmes e Séries)
+                    val topCategories = validCategories.take(2)
+                    kidsList.addAll(topCategories)
+
+                    // Insere o trilho de Serviços de Streaming no MEIO da página
+                    collectionCategoryById[collectionRowId(com.arflix.tv.data.model.CollectionGroupKind.SERVICE)]?.let {
+                        kidsList.add(it)
                     }
-                }.toMutableList()
+
+                    // Insere as demais categorias temáticas (Desenhos, Ficção/Aventura, Comédias, Animes)
+                    val remainingCategories = validCategories.drop(2)
+                    kidsList.addAll(remainingCategories)
+
+                    // Insere o trilho de Gêneros no rodapé
+                    collectionCategoryById[collectionRowId(com.arflix.tv.data.model.CollectionGroupKind.GENRE)]?.let {
+                        kidsList.add(it)
+                    }
+                    kidsList
+                } else {
+                    savedCatalogs.mapNotNull { cfg ->
+                        when {
+                            isCollectionTileConfig(cfg) -> null
+                            isCollectionRailConfig(cfg) -> {
+                                val group = cfg.collectionGroup ?: return@mapNotNull null
+                                collectionCategoryById[collectionRowId(group)]
+                            }
+                            else -> {
+                                val cat = baseCategoriesById[cfg.id]
+                                if (cat == null || cat.items.isEmpty()) null else cat
+                            }
+                        }
+                    }.toMutableList()
+                }
                 
                 // If filtered results are empty, inject dedicated Fenix rows
-                if (finalCategories.none { !it.id.startsWith("collection_row_") }) {
+                if (!isKids && finalCategories.none { !it.id.startsWith("collection_row_") }) {
                     Log.d("HomeVM", "No filtered TMDB content found, injecting dedicated Fenix rows.")
                     
                     val movieItems = fenixCatalog.movies.take(30).mapNotNull { id ->
@@ -2180,8 +2280,12 @@ class HomeViewModel @Inject constructor(
                     try {
                         val freshCW = resolveContinueWatchingItemsStable(forceFresh = true)
                         val filteredCW = freshCW.filter { item ->
-                            if (item.mediaType == MediaType.MOVIE) fenixRepository.isMovieAvailable(item.id)
+                            val fenixAvailable = if (item.mediaType == MediaType.MOVIE) fenixRepository.isMovieAvailable(item.id)
                             else fenixRepository.isSeriesAvailable(item.id)
+                            if (!fenixAvailable) return@filter false
+                            if (isKids) {
+                                kidsContentFilter.state.value.allows(item.toMediaItem())
+                            } else true
                         }
                         if (filteredCW.isNotEmpty()) {
                             val cwCat = Category(
@@ -2194,6 +2298,8 @@ class HomeViewModel @Inject constructor(
                             if (idx >= 0) current[idx] = cwCat else current.add(0, cwCat)
                             _uiState.value = _uiState.value.copy(categories = current)
                         }
+                        // Prioridade 1 foi o Catálogo. Agora, verifica em lote novidades de séries concluídas
+                        checkConcludedSeriesForUpdates()
                     } catch (e: Exception) {
                         if (e is CancellationException) throw e
                         Log.w("HomeVM", "Failed to fetch filtered CW", e)
@@ -2364,11 +2470,24 @@ class HomeViewModel @Inject constructor(
         }
     }
 
+    fun loadNextPageForHomeCategory(categoryId: String) {
+        if (categoryId == "continue_watching" || categoryId.startsWith("collection_row_")) return
+        if (isHardCappedTop10Catalog(categoryId)) return
+        val currentCategory = _uiState.value.categories.firstOrNull { it.id == categoryId } ?: return
+        val hasMore = _uiState.value.categoryHasMoreMap[categoryId] == true
+        val realCount = currentCategory.items.count { !it.isPlaceholder }
+        if (realCount >= 35 && homeRowSupportsViewAll(currentCategory, hasMore)) return
+        loadNextPageForCategory(categoryId)
+    }
+
     fun maybeLoadNextPageForCategory(categoryId: String, focusedItemIndex: Int) {
-        if (categoryId == "continue_watching") return
+        if (categoryId == "continue_watching" || categoryId.startsWith("collection_row_")) return
         if (isHardCappedTop10Catalog(categoryId)) return
         val currentCategory = _uiState.value.categories.firstOrNull { it.id == categoryId } ?: return
         if (currentCategory.items.isEmpty() || currentCategory.items.all { it.isPlaceholder }) return
+        val hasMore = _uiState.value.categoryHasMoreMap[categoryId] == true
+        val realCount = currentCategory.items.count { !it.isPlaceholder }
+        if (realCount >= 35 && homeRowSupportsViewAll(currentCategory, hasMore)) return
         if (focusedItemIndex < currentCategory.items.size - nearEndThreshold) return
         loadNextPageForCategory(categoryId)
     }
@@ -2425,35 +2544,41 @@ class HomeViewModel @Inject constructor(
 
     fun loadNextPageForCategory(categoryId: String) {
         if (isHardCappedTop10Catalog(categoryId)) return
+        val currentCategory = _uiState.value.categories.firstOrNull { it.id == categoryId } ?: return
         Log.i("HomeVM", "🔍 Carregando próxima página para: $categoryId")
         val pagination = categoryPaginationStates.getOrPut(categoryId) {
             CategoryPaginationState(
-                loadedCount = _uiState.value.categories.firstOrNull { it.id == categoryId }?.items?.size ?: 0,
+                loadedCount = currentCategory.items.size,
                 lastLoadedPage = 1
             )
         }
         if (!pagination.hasMore || pagination.isLoading) return
 
         pagination.isLoading = true
+        _uiState.value = _uiState.value.copy(
+            categoryLoadingMap = _uiState.value.categoryLoadingMap + (categoryId to true)
+        )
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 var currentItems = _uiState.value.categories.firstOrNull { it.id == categoryId }?.items ?: return@launch
                 var accumulatedNewItems = mutableListOf<MediaItem>()
                 var hasMoreFromApi = true
                 var currentPageToFetch = pagination.lastLoadedPage + 1
+                val minBatchTarget = 20
                 
-                // Retry loop: if a page has 0 items available in Fenix, try the next one (max 3 pages at once)
+                // Dynamic paging loop: keeps querying until at least [minBatchTarget] approved items are found or max attempts reached
                 var attempts = 0
-                while (accumulatedNewItems.isEmpty() && hasMoreFromApi && attempts < 3) {
+                val activeProfile = profileRepository.getActiveProfile()
+                val isKids = activeProfile?.isKidsProfile == true
+                val kids = kidsContentFilter.state.value
+
+                while (accumulatedNewItems.size < minBatchTarget && hasMoreFromApi && attempts < 6) {
                     attempts++
                     val catalog = savedCatalogById[categoryId]
-                    if (catalog == null) {
-                        Log.w("HomeVM", "⚠️ Catálogo não encontrado para paginação: $categoryId")
-                    }
                     val pageSize = getCategoryPageSize(categoryId)
                     
-                    val result = if (catalog?.isPreinstalled == true && catalog.sourceUrl.isNullOrBlank()) {
-                        // Pure TMDB preinstalled catalog
+                    val result = if (categoryId.startsWith("kids_") || categoryId.startsWith("trending_") || (catalog?.isPreinstalled == true && catalog.sourceUrl.isNullOrBlank())) {
+                        // Pure TMDB preinstalled/kids catalog
                         mediaRepository.loadHomeCategoryPage(categoryId, currentPageToFetch)
                     } else {
                         // MDBList/custom catalog
@@ -2470,13 +2595,15 @@ class HomeViewModel @Inject constructor(
                         break
                     }
 
-                    // CRITICAL: Apply Fenix Filter to paginated results
+                    // CRITICAL: Apply Fenix Filter & Kids Filter to paginated results
                     val filteredNewItems = result.items.filter { item ->
-                        if (item.mediaType == MediaType.MOVIE) fenixRepository.isMovieAvailable(item.id)
+                        val fenixAvailable = if (item.mediaType == MediaType.MOVIE) fenixRepository.isMovieAvailable(item.id)
                         else fenixRepository.isSeriesAvailable(item.id)
+                        if (!fenixAvailable) return@filter false
+                        if (isKids) kids.allows(item) else true
                     }
 
-                    val seen = currentItems.map { "${it.mediaType.name}_${it.id}" }.toHashSet()
+                    val seen = (currentItems + accumulatedNewItems).map { "${it.mediaType.name}_${it.id}" }.toHashSet()
                     val uniqueFiltered = filteredNewItems.filter { item ->
                         seen.add("${item.mediaType.name}_${item.id}")
                     }
@@ -2488,7 +2615,12 @@ class HomeViewModel @Inject constructor(
                 }
 
                 if (accumulatedNewItems.isEmpty()) {
+                    pagination.isLoading = false
                     pagination.hasMore = hasMoreFromApi
+                    _uiState.value = _uiState.value.copy(
+                        categoryLoadingMap = _uiState.value.categoryLoadingMap + (categoryId to false),
+                        categoryHasMoreMap = _uiState.value.categoryHasMoreMap + (categoryId to hasMoreFromApi)
+                    )
                     return@launch
                 }
 
@@ -2524,6 +2656,7 @@ class HomeViewModel @Inject constructor(
 
                 _uiState.value = _uiState.value.copy(
                     categories = updatedCategories,
+                    categoryLoadingMap = _uiState.value.categoryLoadingMap + (categoryId to false),
                     categoryHasMoreMap = _uiState.value.categoryHasMoreMap + (categoryId to hasMoreFromApi)
                 )
             } catch (e: Exception) {
@@ -2531,6 +2664,9 @@ class HomeViewModel @Inject constructor(
                 Log.e("HomeVM", "Error loading next page for $categoryId", e)
             } finally {
                 pagination.isLoading = false
+                _uiState.value = _uiState.value.copy(
+                    categoryLoadingMap = _uiState.value.categoryLoadingMap + (categoryId to false)
+                )
                 updatePaginationStatesInUiState()
             }
         }
@@ -2908,6 +3044,57 @@ class HomeViewModel @Inject constructor(
 
                 // Silently fail - don't clear existing data on error
                 AppLogger.e("HomeVM", "launchContinueWatchingFetch failed", e)
+            }
+        }
+    }
+
+    private var checkConcludedSeriesJob: Job? = null
+
+    private fun checkConcludedSeriesForUpdates() {
+        checkConcludedSeriesJob?.cancel()
+        checkConcludedSeriesJob = viewModelScope.launch(Dispatchers.IO) {
+            delay(1500L) // Aguarda estabilização inicial da UI
+            val concluded = fenixRepository.getConcludedSeries()
+            if (concluded.isEmpty()) return@launch
+
+            Log.d("HomeVM", "🔍 Verificando novidades para ${concluded.size} séries concluídas no Fenix...")
+            val updates = fenixRepository.checkNextEpisodesBatch(concluded)
+
+            var hasAnyNew = false
+            for (up in updates) {
+                if (up.hasNext && up.nextSeason > 0 && up.nextEpisode > 0) {
+                    Log.i("HomeVM", "🎉 Novo episódio detectado para série ${up.seriesId}: S${up.nextSeason} E${up.nextEpisode}!")
+                    fenixRepository.removeConcludedSeries(up.seriesId)
+                    val cachedItem = mediaRepository.getCachedItem(MediaType.TV, up.seriesId)
+                    val showDetails = if (cachedItem?.title.isNullOrBlank() || cachedItem?.title?.startsWith("Série ") == true) {
+                        runCatching { mediaRepository.getTvDetails(up.seriesId) }.getOrNull()
+                    } else null
+
+                    val resolvedTitle = showDetails?.title?.takeIf { it.isNotBlank() }
+                        ?: cachedItem?.title?.takeIf { !it.startsWith("Série ") }
+                        ?: "Série ${up.seriesId}"
+                    val resolvedPoster = showDetails?.image ?: cachedItem?.image
+                    val resolvedBackdrop = showDetails?.backdrop ?: cachedItem?.backdrop
+
+                    traktRepository.saveLocalContinueWatching(
+                        mediaType = MediaType.TV,
+                        tmdbId = up.seriesId,
+                        title = resolvedTitle,
+                        posterPath = resolvedPoster,
+                        backdropPath = resolvedBackdrop,
+                        season = up.nextSeason,
+                        episode = up.nextEpisode,
+                        episodeTitle = null,
+                        progress = 3,
+                        positionSeconds = 0L,
+                        durationSeconds = 0L
+                    )
+                    hasAnyNew = true
+                }
+            }
+
+            if (hasAnyNew) {
+                refreshContinueWatchingOnly(force = true)
             }
         }
     }

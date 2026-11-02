@@ -270,9 +270,9 @@ class MainActivity : ComponentActivity() {
             LaunchedEffect(Unit) {
                 val skipSelection =
                     this@MainActivity.settingsDataStore.data.first()[SKIP_PROFILE_SELECTION_KEY] ?: false
-                if (skipSelection) {
-                    val profiles = profileRepository.get()
-                    val activeProfile = profiles.getActiveProfile()
+                val profiles = profileRepository.get()
+                val activeProfile = profiles.getActiveProfile()
+                if (skipSelection || activeProfile?.isKidsProfile == true) {
                     if (activeProfile == null) {
                         val fallbackProfile = profiles.getProfiles().maxByOrNull { it.lastUsedAt }
                             ?: profiles.createDefaultProfileIfNeeded()
@@ -611,7 +611,7 @@ fun ArflixApp(
         }
     }
 
-    val startDestination = if (skipProfileSelection == true && activeProfile != null) {
+    val startDestination = if ((skipProfileSelection == true || activeProfile?.isKidsProfile == true) && activeProfile != null) {
         Screen.Home.route
     } else {
         Screen.ProfileSelection.route
@@ -637,13 +637,23 @@ fun ArflixApp(
         !currentRoute.contains("profile") &&
         !currentRoute.contains("login")
 
-    // Global System Bars management: ensure immersive fullscreen in the player across transitions.
+    val isPlayerRoute = currentRoute?.contains("player") == true
+    val applySystemBarsPadding = isMobile && !isPlayerRoute
+
+    // Global System Bars & Orientation management: ensure immersive fullscreen in the player across transitions.
     LaunchedEffect(currentRoute) {
         val activity = context.findActivity()
         val window = activity?.window
+        if (activity != null && deviceType != com.arflix.tv.util.DeviceType.TV) {
+            if (isPlayerRoute) {
+                activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            } else {
+                activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_FULL_USER
+            }
+        }
         if (window != null && deviceType != com.arflix.tv.util.DeviceType.TV) {
             val controller = androidx.core.view.WindowInsetsControllerCompat(window, window.decorView)
-            if (currentRoute?.contains("player") == true) {
+            if (isPlayerRoute) {
                 controller.systemBarsBehavior =
                     androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
                 controller.hide(androidx.core.view.WindowInsetsCompat.Type.systemBars())
@@ -670,11 +680,9 @@ fun ArflixApp(
                     )
                 }
             )
-            // On mobile, push content between the status bar and navigation bar.
-            // Applied AFTER background so the gradient fills behind the bars.
-            // systemBarsPadding() reads live WindowInsets, so it automatically
-            // becomes 0 when the player hides the bars.
-            .then(if (isMobile) Modifier.systemBarsPadding() else Modifier)
+            // On mobile, push content between the status bar and navigation bar ONLY when not in player.
+            // When in player, content is edge-to-edge so video never resizes when controls appear.
+            .then(if (applySystemBarsPadding) Modifier.systemBarsPadding() else Modifier)
     ) {
         Box(modifier = Modifier.weight(1f)) {
             AppNavigation(

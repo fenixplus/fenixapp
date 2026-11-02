@@ -2412,91 +2412,46 @@ class TraktRepository @Inject constructor(
         item: ContinueWatchingItem,
         seasonCache: java.util.concurrent.ConcurrentHashMap<Pair<Int, Int>, Deferred<com.arflix.tv.data.api.TmdbSeasonDetails?>> = java.util.concurrent.ConcurrentHashMap()
     ): ContinueWatchingItem = coroutineScope {
-        // Skip only when all Continue Watching metrics are already present.
-        val needsRuntime = item.durationSeconds <= 0L
-        val needsEpisodeCounts = item.mediaType == MediaType.TV && item.totalEpisodes <= 0
-        if (!needsRuntime && !needsEpisodeCounts && item.overview.isNotEmpty() && item.backdropPath?.startsWith("http") == true) {
+        // Se já tiver as informações principais da série preenchidas (título real, backdrop/poster e sinopse),
+        // não precisa refazer a chamada.
+        if (item.title.isNotBlank() && !item.title.startsWith("Série ") &&
+            item.overview.isNotEmpty() && item.backdropPath?.startsWith("http") == true) {
             return@coroutineScope item
         }
 
         val apiKey = Constants.TMDB_API_KEY
         try {
             return@coroutineScope if (item.mediaType == MediaType.TV) {
+                // Busca APENAS os dados da SÉRIE no TMDB (título, backdrop, poster, sinopse, ano, nota)
+                // Sem chamadas adicionais de temporada ou episódio.
                 val details = try {
                     tmdbApi.getTvDetails(item.id, apiKey)
                 } catch (e: Exception) { AppLogger.e("TraktRepository", "Silently returning null", e); null }
 
-                // Get current season info for episode title and aired-episode counts.
-                val seasonDetails = if (item.season != null && item.episode != null && (item.episodeTitle.isNullOrEmpty() || needsEpisodeCounts)) {
-                    try {
-                        val cacheKey = Pair(item.id, item.season)
-                        val newDeferred = CompletableDeferred<com.arflix.tv.data.api.TmdbSeasonDetails?>()
-                        val existingDeferred = seasonCache.putIfAbsent(cacheKey, newDeferred)
-
-                        val deferredSeason = if (existingDeferred == null) {
-                            // We won the insert, do the network call
-                            launch {
-                                val result = try {
-                                    tmdbApi.getTvSeason(item.id, item.season, apiKey)
-                                } catch (e: Exception) { AppLogger.e("TraktRepository", "Silently returning null", e); null }
-                                newDeferred.complete(result)
-                            }
-                            newDeferred
-                        } else {
-                            // Another coroutine is already fetching
-                            existingDeferred
-                        }
-
-                        deferredSeason.await()
-                    } catch (e: Exception) { AppLogger.e("TraktRepository", "Silently returning null", e); null }
-                } else null
-                val episodeInfo = seasonDetails?.episodes?.find { it.episodeNumber == item.episode }
-
-                // Use SHOW's backdrop and overview (like Trakt does), not episode's
                 val backdropUrl = details?.backdropPath?.let { "${Constants.BACKDROP_BASE_LARGE}$it" }
                 val posterUrl = details?.posterPath?.let { "${Constants.IMAGE_BASE}$it" }
-                val totalEpisodeCount = if (item.totalEpisodes > 0) {
-                    item.totalEpisodes
-                } else {
-                    estimateAiredEpisodeCount(
-                        seasons = details?.seasons.orEmpty(),
-                        currentSeason = item.season,
-                        currentSeasonEpisodes = seasonDetails?.episodes
-                    ) ?: 0
-                }
-                val watchedEpisodeCount = if (item.watchedEpisodes > 0) {
-                    item.watchedEpisodes
-                } else {
-                    estimateWatchedEpisodesBeforeCurrent(
-                        seasons = details?.seasons.orEmpty(),
-                        currentSeason = item.season,
-                        currentEpisode = item.episode
-                    )?.coerceAtMost(totalEpisodeCount.takeIf { it > 0 } ?: Int.MAX_VALUE)
-                }
-                val runtimeMinutes = episodeInfo?.runtime ?: details?.episodeRunTime?.firstOrNull()
+                val resolvedTitle = details?.name?.takeIf { it.isNotBlank() } ?: item.title
 
                 item.copy(
-                    overview = details?.overview ?: item.overview,  // Show overview, not episode
-                    backdropPath = backdropUrl ?: item.backdropPath,  // Show backdrop, not episode still
+                    title = resolvedTitle,
+                    overview = details?.overview ?: item.overview,
+                    backdropPath = backdropUrl ?: item.backdropPath,
                     posterPath = posterUrl ?: item.posterPath,
                     year = details?.firstAirDate?.take(4) ?: item.year,
                     tmdbRating = details?.voteAverage?.let { String.format(Locale.US, "%.1f", it) } ?: item.tmdbRating.orEmpty(),
-                    duration = runtimeMinutes?.let { "${it}m" } ?: item.duration,
-                    durationSeconds = maxOf(item.durationSeconds, runtimeMinutesToSeconds(runtimeMinutes)),
-                    episodeTitle = item.episodeTitle ?: episodeInfo?.name,
-                    totalEpisodes = totalEpisodeCount,
-                    watchedEpisodes = watchedEpisodeCount ?: item.watchedEpisodes
+                    episodeTitle = item.episodeTitle ?: (item.episode?.let { "Episódio $it" })
                 )
             } else {
                 val details = try {
                     tmdbApi.getMovieDetails(item.id, apiKey)
                 } catch (e: Exception) { AppLogger.e("TraktRepository", "Silently returning null", e); null }
 
-                // Build full URLs for images
                 val backdropUrl = details?.backdropPath?.let { "${Constants.BACKDROP_BASE_LARGE}$it" }
                 val posterUrl = details?.posterPath?.let { "${Constants.IMAGE_BASE}$it" }
+                val resolvedTitle = details?.title?.takeIf { it.isNotBlank() } ?: item.title
 
                 item.copy(
+                    title = resolvedTitle,
                     overview = details?.overview ?: item.overview,
                     backdropPath = backdropUrl ?: item.backdropPath,
                     posterPath = posterUrl ?: item.posterPath,

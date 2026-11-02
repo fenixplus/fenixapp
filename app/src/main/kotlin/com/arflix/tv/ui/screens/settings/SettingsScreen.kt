@@ -84,8 +84,12 @@ import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.SwitchAccount
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.text.font.FontWeight
+import com.arflix.tv.ui.screens.profile.PinEntryDialog
 import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material.icons.filled.QrCode
 import androidx.compose.material.icons.filled.Unarchive
@@ -227,7 +231,7 @@ private fun tvGeneralRowsForSection(section: String): List<Int> {
         "ai_subtitles" -> listOf(28, 29, 30, 31, 32, 33)
         "playback" -> listOf(10, 11, 12, 13, 14, 37, 34, 16, 15, 40, 27)
         "appearance" -> listOf(17, 18, 20, 21, 24, 23, 22, 41, 36)
-        "profiles" -> listOf(19)
+        "profiles" -> listOf(19, 42)
         "network" -> listOf(25, 26, 35)
         else -> emptyList()
     }
@@ -439,6 +443,18 @@ fun SettingsScreen(
     var homeServerPassword by remember { mutableStateOf("") }
     var plexHomeServerDisplayName by remember { mutableStateOf("") }
     var plexHomeServerUrl by remember { mutableStateOf("") }
+    var showParentalPinVerifyDialog by remember { mutableStateOf(false) }
+    var showParentalPinSetupDialog by remember { mutableStateOf(false) }
+    var parentalPinError by remember { mutableStateOf("") }
+    var showMobileProfilesDialog by remember { mutableStateOf(false) }
+    val onParentalPinClick = {
+        if (uiState.hasParentalPin) {
+            parentalPinError = ""
+            showParentalPinVerifyDialog = true
+        } else {
+            showParentalPinSetupDialog = true
+        }
+    }
 
     val stremioAddons = remember(uiState.addons) {
         uiState.addons.filter { it.runtimeKind == RuntimeKind.STREMIO }
@@ -939,6 +955,7 @@ fun SettingsScreen(
                                                 17 -> viewModel.toggleCardLayoutMode()
                                                 18 -> openUiModeWarningDialog()
                                                 19 -> viewModel.setSkipProfileSelection(!uiState.skipProfileSelection)
+                                                42 -> onParentalPinClick()
                                                 20 -> viewModel.setOledBlackBackground(!uiState.oledBlackBackground)
                                                 21 -> viewModel.cycleClockFormat()
                                                 22 -> viewModel.setShowBudget(!uiState.showBudget)
@@ -1192,6 +1209,7 @@ fun SettingsScreen(
                 viewModel = viewModel,
                 stremioAddons = stremioAddons,
                 onSwitchProfile = onSwitchProfile,
+                onOpenProfilesDialog = { showMobileProfilesDialog = true },
                 openContentLanguagePicker = openContentLanguagePicker,
                 openSubtitlePicker = openSubtitlePicker,
                 openSecondarySubtitlePicker = openSecondarySubtitlePicker,
@@ -1402,6 +1420,8 @@ fun SettingsScreen(
                             onDeviceModeClick = openUiModeWarningDialog,
                             onContentLanguageClick = openContentLanguagePicker,
                             onSkipProfileSelectionToggle = { viewModel.setSkipProfileSelection(it) },
+                            hasParentalPin = uiState.hasParentalPin,
+                            onParentalPinClick = onParentalPinClick,
                             onOledBlackBackgroundToggle = { viewModel.setOledBlackBackground(it) },
                             onClockFormatClick = { viewModel.cycleClockFormat() },
                             onShowBudgetToggle = { viewModel.setShowBudget(it) },
@@ -2255,6 +2275,54 @@ fun SettingsScreen(
                 onDismiss = {
                     showUiModeWarningDialog = false
                 }
+            )
+        }
+
+        if (showParentalPinVerifyDialog) {
+            PinEntryDialog(
+                title = stringResource(R.string.profile_parent_pin_enter),
+                setupHint = stringResource(R.string.profile_parent_pin_change_hint),
+                pinError = parentalPinError,
+                onPinConfirmed = { pin ->
+                    scope.launch {
+                        if (viewModel.verifyParentalPin(pin)) {
+                            showParentalPinVerifyDialog = false
+                            parentalPinError = ""
+                            showParentalPinSetupDialog = true
+                        } else {
+                            parentalPinError = context.getString(R.string.profile_pin_invalid)
+                        }
+                    }
+                },
+                onDismiss = {
+                    showParentalPinVerifyDialog = false
+                    parentalPinError = ""
+                },
+                isSetup = false
+            )
+        }
+
+        if (showParentalPinSetupDialog) {
+            PinEntryDialog(
+                title = stringResource(if (uiState.hasParentalPin) R.string.profile_parent_pin_set_new else R.string.profile_parent_pin_title),
+                setupHint = stringResource(R.string.profile_parent_pin_hint),
+                onPinConfirmed = { pin ->
+                    viewModel.setParentalPin(pin)
+                    showParentalPinSetupDialog = false
+                },
+                onDismiss = { showParentalPinSetupDialog = false },
+                isSetup = true
+            )
+        }
+
+        if (showMobileProfilesDialog) {
+            MobileProfilesDialog(
+                skipProfileSelection = uiState.skipProfileSelection,
+                onSkipProfileSelectionToggle = { shouldSkip -> viewModel.setSkipProfileSelection(shouldSkip) },
+                hasParentalPin = uiState.hasParentalPin,
+                onSwitchProfile = onSwitchProfile,
+                onParentalPinClick = onParentalPinClick,
+                onDismiss = { showMobileProfilesDialog = false }
             )
         }
 
@@ -3440,6 +3508,7 @@ private fun MobileSettingsLayout(
     viewModel: SettingsViewModel,
     stremioAddons: List<com.arflix.tv.data.model.Addon>,
     onSwitchProfile: () -> Unit,
+    onOpenProfilesDialog: () -> Unit = {},
     openContentLanguagePicker: () -> Unit,
     openSubtitlePicker: () -> Unit,
     openSecondarySubtitlePicker: () -> Unit = {},
@@ -3508,6 +3577,7 @@ private fun MobileSettingsLayout(
                 openSecondarySubtitlePicker = openSecondarySubtitlePicker,
                 openAudioLanguagePicker = openAudioLanguagePicker,
                 onSwitchProfile = onSwitchProfile,
+                onOpenProfilesDialog = onOpenProfilesDialog,
                 onNavigateToTelegram = onNavigateToTelegram,
                 onDisconnectTrakt = onDisconnectTrakt
             )
@@ -3588,6 +3658,7 @@ private fun MobileSettingsMainPage(
     openSecondarySubtitlePicker: () -> Unit = {},
     openAudioLanguagePicker: () -> Unit,
     onSwitchProfile: () -> Unit,
+    onOpenProfilesDialog: () -> Unit = {},
     onNavigateToTelegram: () -> Unit = {},
     onDisconnectTrakt: () -> Unit = {}
 ) {
@@ -3737,10 +3808,10 @@ private fun MobileSettingsMainPage(
                 }
                 MobileSettingsRow(
                     icon = Icons.Default.SwitchAccount,
-                    title = stringResource(R.string.switch_profile),
+                    title = stringResource(R.string.profiles),
                     value = "",
                     isFocused = false,
-                    onClick = onSwitchProfile
+                    onClick = onOpenProfilesDialog
                 )
                 if (com.arflix.tv.util.FeatureVisibility.SHOW_TRAKT_ACCOUNT) {
                     MobileSettingsRow(
@@ -3893,13 +3964,6 @@ private fun MobileSettingsSubPage(
                     )
                 }
                 MobileSettingsCategory(title = stringResource(R.string.settings_section_controls)) {
-                    MobileSettingsRow(
-                        icon = Icons.Default.Person,
-                        title = stringResource(R.string.skip_profile),
-                        value = if (uiState.skipProfileSelection) "On" else "Off",
-                        isFocused = false,
-                        onClick = { viewModel.setSkipProfileSelection(!uiState.skipProfileSelection) }
-                    )
                     MobileSettingsRow(
                         icon = Icons.Default.Language,
                         title = stringResource(R.string.dns_provider),
@@ -4815,7 +4879,10 @@ private fun tvSettingsSectionPills(
         "appearance" -> listOf(
             stringResource(R.string.settings_pill_oled, if (uiState.oledBlackBackground) stringResource(R.string.settings_inline_on) else stringResource(R.string.settings_inline_off))
         )
-        "profiles" -> listOf(if (uiState.skipProfileSelection) stringResource(R.string.settings_pill_skip_on) else stringResource(R.string.settings_pill_picker_on))
+        "profiles" -> listOf(
+            if (uiState.skipProfileSelection) stringResource(R.string.settings_pill_skip_on) else stringResource(R.string.settings_pill_picker_on),
+            stringResource(R.string.profile_parent_pin_title) + ": " + stringResource(if (uiState.hasParentalPin) R.string.settings_configured else R.string.settings_not_configured)
+        )
         "network" -> listOf(stringResource(R.string.settings_pill_dns, uiState.dnsProvider), if (uiState.showLoadingStats) stringResource(R.string.settings_pill_stats_on) else stringResource(R.string.settings_pill_stats_off))
         "iptv" -> listOf(
             stringResource(R.string.settings_pill_playlists, uiState.iptvPlaylists.size),
@@ -4871,7 +4938,8 @@ private fun tvSettingsPanelFacts(
             stringResource(R.string.settings_fact_accent_color) to uiState.accentColor
         )
         "profiles" -> listOf(
-            stringResource(R.string.settings_fact_startup) to if (uiState.skipProfileSelection) stringResource(R.string.settings_skip_picker) else stringResource(R.string.settings_show_picker)
+            stringResource(R.string.settings_fact_startup) to if (uiState.skipProfileSelection) stringResource(R.string.settings_skip_picker) else stringResource(R.string.settings_show_picker),
+            stringResource(R.string.profile_parent_pin_title) to stringResource(if (uiState.hasParentalPin) R.string.settings_configured else R.string.settings_not_configured)
         )
         "network" -> listOf(
             stringResource(R.string.settings_fact_dns) to uiState.dnsProvider,
@@ -5001,6 +5069,7 @@ private fun TvGeneralSettingsRows(
     subtitleStyle: String = "Bold",
     deviceModeOverride: String = "auto",
     skipProfileSelection: Boolean = false,
+    hasParentalPin: Boolean = false,
     oledBlackBackground: Boolean = false,
     clockFormat: String = "24h",
     showBudget: Boolean = true,
@@ -5022,6 +5091,7 @@ private fun TvGeneralSettingsRows(
     onDeviceModeClick: () -> Unit = {},
     onContentLanguageClick: () -> Unit = {},
     onSkipProfileSelectionToggle: (Boolean) -> Unit = {},
+    onParentalPinClick: () -> Unit = {},
     onOledBlackBackgroundToggle: (Boolean) -> Unit = {},
     onClockFormatClick: () -> Unit = {},
     onShowBudgetToggle: (Boolean) -> Unit = {},
@@ -5139,6 +5209,15 @@ private fun TvGeneralSettingsRows(
                     modifier = Modifier.settingsFocusSlot(localIndex)
                 )
                 19 -> SettingsToggleRow(stringResource(R.string.skip_profile), stringResource(R.string.skip_profile_desc), skipProfileSelection, focusedIndex == localIndex, onSkipProfileSelectionToggle, Modifier.settingsFocusSlot(localIndex))
+                42 -> SettingsRow(
+                    icon = Icons.Default.Lock,
+                    title = stringResource(R.string.profile_parent_pin_title),
+                    subtitle = stringResource(if (hasParentalPin) R.string.profile_parent_pin_configured_desc else R.string.profile_parent_pin_not_configured_desc),
+                    value = stringResource(if (hasParentalPin) R.string.settings_configured else R.string.settings_not_configured),
+                    isFocused = focusedIndex == localIndex,
+                    onClick = onParentalPinClick,
+                    modifier = Modifier.settingsFocusSlot(localIndex)
+                )
                 20 -> SettingsToggleRow(stringResource(R.string.oled_black_background), stringResource(R.string.oled_black_background_desc), oledBlackBackground, focusedIndex == localIndex, onOledBlackBackgroundToggle, Modifier.settingsFocusSlot(localIndex))
                 21 -> SettingsRow(Icons.Default.Schedule, stringResource(R.string.clock_format), stringResource(R.string.clock_format_desc), if (clockFormat == "12h") "12-hour" else "24-hour", focusedIndex == localIndex, onClockFormatClick, Modifier.settingsFocusSlot(localIndex))
                 22 -> SettingsToggleRow(stringResource(R.string.show_budget), stringResource(R.string.show_budget_desc), showBudget, focusedIndex == localIndex, onShowBudgetToggle, Modifier.settingsFocusSlot(localIndex))
@@ -10109,6 +10188,238 @@ private fun CatalogPackDeleteConfirmDialog(
                             text = "Cancel",
                             style = ArflixTypography.button,
                             color = if (isCancelFocused) Color.Black else Color.White
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MobileProfilesDialog(
+    skipProfileSelection: Boolean,
+    onSkipProfileSelectionToggle: (Boolean) -> Unit,
+    hasParentalPin: Boolean,
+    onSwitchProfile: () -> Unit,
+    onParentalPinClick: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    androidx.compose.ui.window.Dialog(
+        onDismissRequest = onDismiss,
+        properties = androidx.compose.ui.window.DialogProperties(
+            dismissOnBackPress = true,
+            dismissOnClickOutside = true,
+            usePlatformDefaultWidth = false
+        )
+    ) {
+        ModalScrim(onDismiss = onDismiss) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth(0.92f)
+                    .widthIn(max = 440.dp)
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(BackgroundElevated)
+                    .padding(24.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = stringResource(R.string.profiles),
+                        color = Color.White,
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Box(
+                        modifier = Modifier
+                            .size(32.dp)
+                            .clip(CircleShape)
+                            .clickable { onDismiss() }
+                            .background(Color.White.copy(alpha = 0.08f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = stringResource(R.string.cancel),
+                            tint = Color.White.copy(alpha = 0.7f),
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(18.dp))
+
+                // Switch Profile option
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color.White.copy(alpha = 0.06f))
+                        .clickable {
+                            onDismiss()
+                            onSwitchProfile()
+                        }
+                        .padding(16.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(CircleShape)
+                                .background(Color.White.copy(alpha = 0.1f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.SwitchAccount,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(14.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = stringResource(R.string.switch_profile),
+                                color = Color.White,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = stringResource(R.string.settings_switch_profile_desc),
+                                color = Color.White.copy(alpha = 0.6f),
+                                fontSize = 13.sp
+                            )
+                        }
+                        Icon(
+                            imageVector = Icons.Default.ChevronRight,
+                            contentDescription = null,
+                            tint = Color.White.copy(alpha = 0.4f),
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Skip Profile Selection option (Toggle)
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color.White.copy(alpha = 0.06f))
+                        .clickable { onSkipProfileSelectionToggle(!skipProfileSelection) }
+                        .padding(16.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(CircleShape)
+                                .background(Color.White.copy(alpha = 0.1f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Person,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(14.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = stringResource(R.string.skip_profile),
+                                color = Color.White,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = stringResource(R.string.skip_profile_desc),
+                                color = Color.White.copy(alpha = 0.6f),
+                                fontSize = 13.sp
+                            )
+                        }
+                        // Toggle switch UI
+                        Box(
+                            modifier = Modifier
+                                .width(44.dp)
+                                .height(24.dp)
+                                .background(
+                                    color = if (skipProfileSelection) SuccessGreen else Color.White.copy(alpha = 0.2f),
+                                    shape = RoundedCornerShape(13.dp)
+                                )
+                                .padding(3.dp),
+                            contentAlignment = if (skipProfileSelection) Alignment.CenterEnd else Alignment.CenterStart
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(18.dp)
+                                    .background(color = Color.White, shape = RoundedCornerShape(10.dp))
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Parental PIN option
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color.White.copy(alpha = 0.06f))
+                        .clickable {
+                            onDismiss()
+                            onParentalPinClick()
+                        }
+                        .padding(16.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(CircleShape)
+                                .background(Color.White.copy(alpha = 0.1f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Lock,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(14.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = stringResource(R.string.profile_parent_pin_title),
+                                color = Color.White,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = stringResource(if (hasParentalPin) R.string.profile_parent_pin_configured_desc else R.string.profile_parent_pin_not_configured_desc),
+                                color = Color.White.copy(alpha = 0.6f),
+                                fontSize = 13.sp
+                            )
+                        }
+                        Text(
+                            text = stringResource(if (hasParentalPin) R.string.settings_configured else R.string.settings_not_configured),
+                            color = if (hasParentalPin) SuccessGreen else Color.White.copy(alpha = 0.5f),
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium
                         )
                     }
                 }
