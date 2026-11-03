@@ -3,6 +3,7 @@ package com.arflix.tv.core.plugin.cloudstream
 import android.util.Log
 import com.arflix.tv.domain.model.ExternalPluginEntry
 import com.arflix.tv.domain.model.ExternalRepoManifest
+import com.arflix.tv.network.HttpsOnlyInterceptor
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.Types
 import kotlinx.coroutines.Dispatchers
@@ -41,6 +42,8 @@ class ExternalRepoParser @Inject constructor(
         .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
         .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
         .followRedirects(true)
+        // Repository lists point to DEX code the app loads: never fetch them over plain HTTP.
+        .addNetworkInterceptor(HttpsOnlyInterceptor())
         .build()
 
     private val repoManifestAdapter = moshi.adapter(ExternalRepoManifest::class.java)
