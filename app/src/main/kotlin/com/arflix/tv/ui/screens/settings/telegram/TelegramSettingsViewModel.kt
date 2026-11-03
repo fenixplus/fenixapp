@@ -6,10 +6,12 @@ import com.arflix.tv.data.telegram.TelegramAuthState
 import com.arflix.tv.data.telegram.TelegramRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 @HiltViewModel
@@ -35,8 +37,11 @@ class TelegramSettingsViewModel @Inject constructor(
     fun submitPassword(password: String) = repository.submitPassword(password)
 
     fun disconnect() {
-        repository.disconnect()
-        _cacheSizeBytes.value = 0L
+        viewModelScope.launch {
+            // Finish the sign-out even if the user leaves this screen meanwhile.
+            withContext(NonCancellable) { repository.disconnect() }
+            _cacheSizeBytes.value = 0L
+        }
     }
 
     fun clearCache() {

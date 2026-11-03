@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.arflix.tv.R
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -39,6 +40,9 @@ class TelegramClient @Inject constructor(
 ) {
     companion object {
         private const val TAG = "TelegramClient"
+
+        private const val LOG_OUT_TIMEOUT_MS = 15_000L
+        private const val CLOSE_AFTER_LOG_OUT_TIMEOUT_MS = 5_000L
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -47,6 +51,10 @@ class TelegramClient @Inject constructor(
     val authState: StateFlow<TelegramAuthState> = _authState.asStateFlow()
 
     private var client: Client? = null
+
+    // Completed when TDLib reports AuthorizationStateClosed for the current client.
+    @Volatile
+    private var closedSignal = CompletableDeferred<Unit>()
 
     val isAvailable: Boolean by lazy {
         try {
@@ -71,6 +79,7 @@ class TelegramClient @Inject constructor(
             _authState.value = TelegramAuthState.Initializing
             try {
                 stepLog("calling Client.create")
+                closedSignal = CompletableDeferred()
                 client = Client.create(
                     { update -> handleUpdate(update) },
                     { e -> Log.e(TAG, "Update exception", e) },
@@ -189,9 +198,12 @@ class TelegramClient @Inject constructor(
                     }
                 }
             }
-            is TdApi.AuthorizationStateClosing,
+            is TdApi.AuthorizationStateClosing -> {
+                _authState.value = TelegramAuthState.Idle
+            }
             is TdApi.AuthorizationStateClosed -> {
                 _authState.value = TelegramAuthState.Idle
+                closedSignal.complete(Unit)
             }
             else -> {}
         }
@@ -245,5 +257,34 @@ class TelegramClient @Inject constructor(
         client?.send(TdApi.Close(), null)
         client = null
         _authState.value = TelegramAuthState.Idle
+    }
+
+    /**
+     * Signs this device out of Telegram. TDLib's LogOut revokes the session on
+     * Telegram's servers, so it leaves the account's device list, and deletes the
+     * local database. [reset] alone only closes the client and leaves that server
+     * session valid for anyone holding a copy of the local files.
+     *
+     * Falls back to a local-only close when Telegram does not confirm in time (for
+     * example while offline). Returns true when the server confirmed the log out.
+     */
+    suspend fun logOut(): Boolean {
+        if (client == null) return false
+        val closed = closedSignal
+        val revoked = try {
+            sendRequest(TdApi.LogOut(), LOG_OUT_TIMEOUT_MS) is TdApi.Ok
+        } catch (e: TelegramApiException) {
+            Log.w(TAG, "Telegram refused the log out: ${e.message}")
+            false
+        }
+        if (revoked) {
+            // TDLib closes itself and deletes its files after a log out; wait for it so
+            // the caller does not wipe the same directories while TDLib still uses them.
+            withTimeoutOrNull(CLOSE_AFTER_LOG_OUT_TIMEOUT_MS) { closed.await() }
+        } else {
+            Log.w(TAG, "Telegram log out not confirmed; closing the local session only")
+        }
+        reset()
+        return revoked
     }
 }
