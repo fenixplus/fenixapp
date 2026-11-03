@@ -33,8 +33,8 @@ import javax.inject.Singleton
 
 /**
  * Runs a local Ktor HTTP server on a random port.
- * ExoPlayer streams from http://localhost:PORT/file/{fileId}
- * with full Range request support.
+ * ExoPlayer streams from http://127.0.0.1:PORT/{token}/file/{fileId}
+ * (URLs come from [getUrl]) with single-range request support.
  *
  * TDLib downloads the requested byte range on demand via downloadFile
  * with offset + limit parameters, enabling seek without full download.
@@ -52,6 +52,7 @@ class TelegramStreamingProxy @Inject constructor(
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val streamAccess = TelegramStreamAccess()
     private var port: Int = 0
     private var server: io.ktor.server.engine.ApplicationEngine? = null
     
@@ -103,15 +104,18 @@ class TelegramStreamingProxy @Inject constructor(
         // Garantir que temos uma porta válida (caso o findFreePort no init tenha falhado ou a porta tenha sido liberada)
         if (port == 0) port = findFreePort()
         
+        // Listens on all interfaces so a Chromecast can reach it; streamAccess limits
+        // what that exposure can serve (see TelegramStreamAccess).
         server = embeddedServer(CIO, port = port, host = "0.0.0.0") {
             routing {
-                get("/file/{fileId}") {
+                get("/{token}/file/{fileId}") {
                     val fileId = call.parameters["fileId"]?.toIntOrNull()
-                    Log.d(TAG, "Request: fileId=$fileId range=${call.request.headers[HttpHeaders.Range]}")
-                    if (fileId == null) {
-                        call.respond(HttpStatusCode.BadRequest)
+                    if (fileId == null || !streamAccess.isAllowed(call.parameters["token"], fileId)) {
+                        call.respond(HttpStatusCode.NotFound)
                         return@get
                     }
+                    val rangeHeader = call.request.headers[HttpHeaders.Range]
+                    Log.d(TAG, "Request: fileId=$fileId range=$rangeHeader")
 
                     // When a new file starts streaming, clean up the previous one so
                     // TDLib's downloaded chunks don't accumulate in tdlib_files/ indefinitely.
@@ -120,9 +124,6 @@ class TelegramStreamingProxy @Inject constructor(
                         scope.launch { deleteFile(prev) }
                     }
                     lastStreamedFileId = fileId
-
-                    val rangeHeader = call.request.headers[HttpHeaders.Range]
-                    val (rangeStart, rangeEnd) = parseRange(rangeHeader)
 
                     // Get file info to know total size
                     val fileInfo = getFileInfo(fileId)
@@ -134,12 +135,19 @@ class TelegramStreamingProxy @Inject constructor(
                         return@get
                     }
 
+                    val range = resolveByteRange(rangeHeader, totalSize)
+                    if (range == null) {
+                        call.response.header(HttpHeaders.ContentRange, "bytes */$totalSize")
+                        call.respond(HttpStatusCode.RequestedRangeNotSatisfiable)
+                        return@get
+                    }
+
                     // Start async metadata prefetch on first request for this file
                     prefetchMetadata(fileId, totalSize)
 
-                    val start = rangeStart ?: 0L
-                    val end = rangeEnd ?: (totalSize - 1L)
-                    val length = end - start + 1
+                    val start = range.start
+                    val end = range.end
+                    val length = range.length
 
                     // Logging for metadata/index detection (ExoPlayer typical behavior)
                     val isMetadata = start > totalSize * 0.9 && totalSize > 10 * 1024 * 1024
@@ -210,10 +218,8 @@ class TelegramStreamingProxy @Inject constructor(
         }
     }
 
-    fun getUrl(fileId: Int): String {
-        val url = "http://127.0.0.1:$port/file/$fileId"
-        return url
-    }
+    /** Stream URL for [fileId]; only file IDs passed through here are served. */
+    fun getUrl(fileId: Int): String = "http://127.0.0.1:$port${streamAccess.pathFor(fileId)}"
 
     /**
      * Internal helper to pre-fetch metadata (the last part of the file)
@@ -416,21 +422,6 @@ class TelegramStreamingProxy @Inject constructor(
         val totalSize = file.size.takeIf { it > 0 } ?: file.expectedSize
         val localPath = file.local?.path?.takeIf { it.isNotBlank() }
         return Pair(localPath, totalSize)
-    }
-
-    private fun parseRange(header: String?): Pair<Long?, Long?> {
-        if (header == null) return Pair(null, null)
-        return try {
-            val range = header.removePrefix("bytes=")
-            val parts = range.split("-")
-            val start = parts.getOrNull(0)?.toLongOrNull()
-            val end = parts.getOrNull(1)?.toLongOrNull()
-            Pair(start, end)
-        } catch (e: Exception) {
-            if (e is kotlinx.coroutines.CancellationException) throw e
-
-            Pair(null, null)
-        }
     }
 
     private fun formatSize(bytes: Long): String {
