@@ -17,6 +17,7 @@ import com.arflix.tv.domain.model.RemotePluginInfo
 import com.arflix.tv.domain.model.RepositoryType
 import com.arflix.tv.domain.model.ScraperInfo
 import com.arflix.tv.domain.model.ScraperManifestInfo
+import com.arflix.tv.network.HttpsOnlyInterceptor
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 import kotlinx.coroutines.CoroutineDispatcher
@@ -79,6 +80,8 @@ class PluginManager @Inject constructor(
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
+        // Manifests and scraper code are executed by the app: never fetch them over plain HTTP.
+        .addNetworkInterceptor(HttpsOnlyInterceptor())
         .build()
 
     private fun sha256Hex(text: String): String {

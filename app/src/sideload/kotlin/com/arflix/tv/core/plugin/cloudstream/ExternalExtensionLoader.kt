@@ -12,6 +12,7 @@ import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.extractorApis
 import com.arflix.tv.core.plugin.TestDiagnostics
+import com.arflix.tv.network.HttpsOnlyInterceptor
 import dalvik.system.DexClassLoader
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
@@ -175,6 +176,8 @@ class ExternalExtensionLoader @Inject constructor(
         .connectTimeout(60, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .followRedirects(true)
+        // The downloaded .cs3 files run in-process: never fetch them over plain HTTP.
+        .addNetworkInterceptor(HttpsOnlyInterceptor())
         .build()
 
     /** Cache of loaded MainAPI instances by scraper ID */
