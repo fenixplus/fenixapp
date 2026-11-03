@@ -1,6 +1,6 @@
 # Política de Privacidade - Fênix
 
-**Última atualização: 09 de Agosto de 2026**
+**Última atualização: 03 de Novembro de 2026**
 
 ## Visão Geral
 
@@ -15,6 +15,7 @@ O Fênix armazena dados no seu dispositivo para que o app possa lembrar sua conf
 - Perfis, nomes de perfil e configurações de PIN.
 - Idioma do app, interface, legendas, áudio e configurações de reprodução.
 - Histórico de exibição local e progresso.
+- A sessão da sua conta do Telegram, com o cache de mensagens e de vídeos que ela mantém. Ao desconectar a conta nas configurações, o app pede ao Telegram que encerre essa sessão e apaga esses dados do dispositivo.
 
 ## Como Usamos os Dados
 
@@ -34,6 +35,8 @@ O App pode usar estes serviços dependendo dos recursos que você ativar:
 |---------|-----------|
 | TMDB | Metadados e imagens de filmes/séries |
 | Telegram | O app reproduz os vídeos dos servidores do Telegram |
+| fenixplayerbot (bot do Fênix no Telegram) | Recebe as buscas e os pedidos de catálogo feitos pelo app. Como acontece com qualquer bot do Telegram consultado, ele também recebe o ID, o nome, o @username e o idioma da sua conta |
+| GitHub | O app consulta as versões publicadas do Fênix para avisar quando há atualização |
 
 ## Exclusão de Dados
 
