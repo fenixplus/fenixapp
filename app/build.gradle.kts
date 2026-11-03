@@ -373,8 +373,8 @@ ksp {
 
     // Plugin system dependencies (Sideload flavor only)
     add("sideloadImplementation", files("libs/quickjs-kt-android-1.0.5-nuvio.aar"))
-    add("sideloadImplementation", "com.fasterxml.jackson.core:jackson-databind:2.17.0")
-    add("sideloadImplementation", "com.fasterxml.jackson.module:jackson-module-kotlin:2.17.0")
+    add("sideloadImplementation", "com.fasterxml.jackson.core:jackson-databind:2.18.12")
+    add("sideloadImplementation", "com.fasterxml.jackson.module:jackson-module-kotlin:2.18.12")
     add("sideloadImplementation", "com.github.Blatzar:NiceHttp:0.4.11")
     add("sideloadImplementation", "org.conscrypt:conscrypt-android:2.5.3")
     add("sideloadImplementation", "com.github.recloudstream.cloudstream:library-android:v4.7.0") {
@@ -489,8 +489,8 @@ dependencies {
 
     // Plugin system dependencies (Sideload flavor only)
     add("sideloadImplementation", files("libs/quickjs-kt-android-1.0.5-nuvio.aar"))
-    add("sideloadImplementation", "com.fasterxml.jackson.core:jackson-databind:2.17.0")
-    add("sideloadImplementation", "com.fasterxml.jackson.module:jackson-module-kotlin:2.17.0")
+    add("sideloadImplementation", "com.fasterxml.jackson.core:jackson-databind:2.18.12")
+    add("sideloadImplementation", "com.fasterxml.jackson.module:jackson-module-kotlin:2.18.12")
     add("sideloadImplementation", "com.github.Blatzar:NiceHttp:0.4.11")
     add("sideloadImplementation", "org.conscrypt:conscrypt-android:2.5.3")
     add("sideloadImplementation", "com.github.recloudstream.cloudstream:library-android:v4.7.0") {
