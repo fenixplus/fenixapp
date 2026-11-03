@@ -44,6 +44,10 @@ android {
         buildConfigField("Boolean", "ENABLE_NETLIFY_CLOUD_SYNC", "true")
         buildConfigField("Boolean", "ENABLE_SUPABASE_SYNC_MIRROR", "false")
         buildConfigField("String", "NETLIFY_BACKEND_URL", "\"https://auth.arvio.tv/.netlify/functions\"")
+        // The daily "app_open" usage event inherited from ARVIO posts to NETLIFY_BACKEND_URL,
+        // which is ARVIO's backend, not a Fênix server. Keep it off unless this build points
+        // that URL to a backend it owns and the privacy policy lists the event.
+        buildConfigField("Boolean", "ENABLE_APP_USAGE_ANALYTICS", "false")
         buildConfigField(
             "String",
             "APP_ANON_KEY",
