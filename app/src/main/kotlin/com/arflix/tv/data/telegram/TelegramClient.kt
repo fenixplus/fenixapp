@@ -2,6 +2,7 @@ package com.arflix.tv.data.telegram
 
 import android.content.Context
 import android.util.Log
+import com.arflix.tv.BuildConfig
 import com.arflix.tv.R
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CompletableDeferred
@@ -41,6 +42,11 @@ class TelegramClient @Inject constructor(
     companion object {
         private const val TAG = "TelegramClient"
 
+        // TDLib logs at verbosity 5 by default, and on Android that goes to logcat:
+        // every request (phone number, login code) and every update (message text
+        // from all chats). Release builds keep only errors.
+        private const val RELEASE_TDLIB_LOG_VERBOSITY = 1
+
         private const val LOG_OUT_TIMEOUT_MS = 15_000L
         private const val CLOSE_AFTER_LOG_OUT_TIMEOUT_MS = 5_000L
     }
@@ -78,6 +84,11 @@ class TelegramClient @Inject constructor(
             stepLog("library loaded OK")
             _authState.value = TelegramAuthState.Initializing
             try {
+                if (!BuildConfig.DEBUG) {
+                    runCatching {
+                        Client.execute(TdApi.SetLogVerbosityLevel(RELEASE_TDLIB_LOG_VERBOSITY))
+                    }.onFailure { Log.w(TAG, "Could not lower TDLib log verbosity", it) }
+                }
                 stepLog("calling Client.create")
                 closedSignal = CompletableDeferred()
                 client = Client.create(
