@@ -7,9 +7,11 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import com.arflix.tv.util.telegramDataStore
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.withContext
 import org.drinkless.tdlib.TdApi
 import java.io.File
 import javax.inject.Inject
@@ -99,9 +101,13 @@ class TelegramRepository @Inject constructor(
     fun submitCode(code: String) = client.submitCode(code)
     fun submitPassword(password: String) = client.submitPassword(password)
 
-    fun disconnect() {
-        client.reset()
-        wipeTdlibFiles(context)
+    /**
+     * Signs out of Telegram, revoking the session on Telegram's servers when they can
+     * be reached, then wipes the local TDLib data.
+     */
+    suspend fun disconnect() {
+        client.logOut()
+        withContext(Dispatchers.IO) { wipeTdlibFiles(context) }
     }
 
     fun getCacheSize(): Long {
