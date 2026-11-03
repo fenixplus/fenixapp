@@ -34,6 +34,7 @@ class AppUsageAnalyticsRepository @Inject constructor(
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
 
     suspend fun recordAppOpen() = withContext(Dispatchers.IO) {
+        if (!BuildConfig.ENABLE_APP_USAGE_ANALYTICS) return@withContext
         if (!Constants.USE_NETLIFY_CLOUD_SYNC &&
             (Constants.SUPABASE_URL.isBlank() || Constants.SUPABASE_ANON_KEY.isBlank())
         ) return@withContext
