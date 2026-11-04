@@ -17,7 +17,7 @@ out/
 release/
 
 # Repository-local automation not used by this distribution
-.github/workflows/
+# .github/workflows/
 
 # Gradle files
 .gradle/

@@ -1,0 +1,103 @@
+name: Release APK
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      draft:
+        description: 'Criar como rascunho (Draft)? Apenas você vê até aprovar.'
+        required: true
+        type: boolean
+        default: true
+
+jobs:
+  build-release:
+    name: Build & Package Sideload Release APK
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Restore Keystore from Secrets
+        env:
+          KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          mkdir -p "$HOME/keystore"
+          echo "$KEYSTORE_BASE64" | base64 -d > "$HOME/keystore/fenix-release.jks"
+          cat <<EOF > keystore.properties
+          storeFile=$HOME/keystore/fenix-release.jks
+          storePassword=$KEYSTORE_PASSWORD
+          keyAlias=$KEY_ALIAS
+          keyPassword=$KEY_PASSWORD
+          EOF
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Assemble Sideload Release
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+        run: ./gradlew :app:assembleSideloadRelease --no-daemon --stacktrace
+
+      - name: Prepare Artifacts & Checksums
+        id: prepare_apk
+        run: |
+          VERSION=$(grep -o 'versionName = "[^"]*"' app/build.gradle.kts | head -n1 | cut -d'"' -f2)
+          echo "Detected version: $VERSION"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+          OUTPUT_DIR="app/build/outputs/apk/sideload/release"
+          APK_NAME="FENIX-v${VERSION}-sideload-release.apk"
+
+          cp "$OUTPUT_DIR/app-sideload-release.apk" "./$APK_NAME"
+          sha256sum "$APK_NAME" > "${APK_NAME}.sha256"
+
+          echo "apk_path=$APK_NAME" >> $GITHUB_OUTPUT
+          echo "sha_path=${APK_NAME}.sha256" >> $GITHUB_OUTPUT
+
+      - name: Upload APK as Workflow Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.prepare_apk.outputs.apk_path }}
+          path: ${{ steps.prepare_apk.outputs.apk_path }}
+          retention-days: 14
+
+      - name: Determine Draft Status
+        id: draft_status
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "is_draft=${{ github.event.inputs.draft }}" >> $GITHUB_OUTPUT
+          else
+            echo "is_draft=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create or Update GitHub Release (Draft)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', steps.prepare_apk.outputs.version) }}
+          name: Fênix v${{ steps.prepare_apk.outputs.version }}
+          draft: ${{ steps.draft_status.outputs.is_draft }}
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            ${{ steps.prepare_apk.outputs.apk_path }}
+            ${{ steps.prepare_apk.outputs.sha_path }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
