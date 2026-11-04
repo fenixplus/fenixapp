@@ -48,6 +48,21 @@ jobs:
           keyPassword=$KEY_PASSWORD
           EOF
 
+      - name: Generate secrets.properties
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+        run: |
+          cat <<EOF > secrets.properties
+          TMDB_API_KEY=$TMDB_API_KEY
+          TELEGRAM_API_ID=$TELEGRAM_API_ID
+          TELEGRAM_API_HASH=$TELEGRAM_API_HASH
+          EOF
+
+          # Cria uma cópia dentro de app/ para garantir que o Gradle ache o arquivo onde quer que o procure
+          cp secrets.properties app/secrets.properties
+
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
