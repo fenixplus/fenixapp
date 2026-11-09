@@ -39,14 +39,18 @@ jobs:
           KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: |
-          mkdir -p "$HOME/keystore"
-          echo "$KEYSTORE_BASE64" | base64 -d > "$HOME/keystore/fenix-release.jks"
-          cat <<EOF > keystore.properties
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            mkdir -p "$HOME/keystore"
+            echo "$KEYSTORE_BASE64" | base64 -d > "$HOME/keystore/fenix-release.jks"
+            cat <<EOF > keystore.properties
           storeFile=$HOME/keystore/fenix-release.jks
           storePassword=$KEYSTORE_PASSWORD
           keyAlias=$KEY_ALIAS
           keyPassword=$KEY_PASSWORD
           EOF
+          else
+            echo "Aviso: RELEASE_KEYSTORE_BASE64 não fornecido nos Secrets. Gradle usará assinatura debug automaticamente."
+          fi
 
       - name: Generate secrets.properties
         env:
