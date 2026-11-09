@@ -92,15 +92,16 @@ data class AiKeyServerState(
 data class SettingsUiState(
     val defaultSubtitle: String = "Off",
     val subtitleOptions: List<String> = emptyList(),
-    val defaultAudioLanguage: String = "Auto (Original)",
+    val defaultAudioLanguage: String = "Portuguese (Brazil)",
     val audioLanguageOptions: List<String> = emptyList(),
+    val subtitleFilterLanguage: String = "Portuguese (Brazil)",
     val cardLayoutMode: String = CARD_LAYOUT_MODE_LANDSCAPE,
     val frameRateMatchingMode: String = "Off",
     val autoPlayNext: Boolean = true,
     val autoPlaySingleSource: Boolean = true,
     val autoPlayMinQuality: String = "Any",
-    val dnsProvider: String = "System DNS",
-    val dnsProviderOptions: List<String> = listOf("System DNS", "Cloudflare", "Google", "AdGuard"),
+    val dnsProvider: String = "Cloudflare",
+    val dnsProviderOptions: List<String> = listOf("Cloudflare", "System DNS", "Google", "AdGuard"),
     val customUserAgent: String = "",
     val subtitleSize: String = "Medium",
     val subtitleColor: String = "White",
@@ -294,6 +295,8 @@ class SettingsViewModel @Inject constructor(
     private fun subtitleStyleKey() = profileManager.profileStringKey("subtitle_style")
     private fun subtitleStylizedKey() = profileManager.profileBooleanKey("subtitle_stylized")
     private fun filterSubtitlesByLanguageKey() = profileManager.profileBooleanKey("filter_subtitles_by_lang")
+    private fun subtitleFilterLanguageKey() = profileManager.profileStringKey("subtitle_filter_language")
+    private fun subtitleFilterLanguageKeyFor(profileId: String) = profileManager.profileStringKeyFor(profileId, "subtitle_filter_language")
     private fun secondarySubtitleKey() = profileManager.profileStringKey("secondary_subtitle")
     private val dnsProviderKey = stringPreferencesKey(OkHttpProvider.DNS_PROVIDER_PREF_KEY)
     private val customUserAgentKey = stringPreferencesKey(OkHttpProvider.USER_AGENT_PREF_KEY)
@@ -458,7 +461,16 @@ class SettingsViewModel @Inject constructor(
             // Load local preferences first
             val prefs = context.settingsDataStore.data.first()
             var defaultSub = prefs[defaultSubtitleKey()] ?: "Off"
-            val defaultAudio = prefs[defaultAudioLanguageKey()] ?: "Auto (Original)"
+            var defaultAudio = prefs[defaultAudioLanguageKey()]
+            if (defaultAudio.isNullOrBlank() || defaultAudio == "Auto" || defaultAudio == "Auto (Original)") {
+                defaultAudio = "Portuguese (Brazil)"
+                context.settingsDataStore.edit { it[defaultAudioLanguageKey()] = "Portuguese (Brazil)" }
+            }
+            var subtitleFilterLang = prefs[subtitleFilterLanguageKey()]
+            if (subtitleFilterLang.isNullOrBlank()) {
+                subtitleFilterLang = "Portuguese (Brazil)"
+                context.settingsDataStore.edit { it[subtitleFilterLanguageKey()] = "Portuguese (Brazil)" }
+            }
             val cardLayoutMode = normalizeCardLayoutMode(prefs[cardLayoutModeKey()])
             val frameRateMode = normalizeFrameRateMode(prefs[frameRateMatchingModeKey()])
             val deviceModeOverride = prefs[com.arflix.tv.util.DEVICE_MODE_OVERRIDE_KEY] ?: "auto"
@@ -581,6 +593,7 @@ class SettingsViewModel @Inject constructor(
                 subtitleOffset = subtitleOffset,
                 subtitleStylized = subtitleStylized,
                 filterSubtitlesByLanguage = filterSubtitlesByLanguage,
+                subtitleFilterLanguage = subtitleFilterLang,
                 secondarySubtitle = secondarySubtitle,
                 dnsProvider = dnsProviderLabel(dnsProviderValue),
                 customUserAgent = customUserAgent,
@@ -904,6 +917,8 @@ class SettingsViewModel @Inject constructor(
 
         // Keep this list >= 25 items; this is the "always available" picker list.
         val defaults = listOf(
+            "Portuguese (Brazil)",
+            "Portuguese",
             "English",
             "Arabic",
             "Bengali",
@@ -956,9 +971,17 @@ class SettingsViewModel @Inject constructor(
 
     private fun loadAudioLanguageOptions(current: String): List<String> {
         val defaults = listOf(
+            "Portuguese (Brazil)",
+            "Portuguese",
             "Auto (Original)",
-            "None",
             "English",
+            "None",
+            "Spanish",
+            "French",
+            "German",
+            "Italian",
+            "Japanese",
+            "Korean",
             "Arabic",
             "Bengali",
             "Bulgarian",
@@ -1053,6 +1076,16 @@ class SettingsViewModel @Inject constructor(
                 prefs[filterSubtitlesByLanguageKey()] = enabled
             }
             _uiState.value = _uiState.value.copy(filterSubtitlesByLanguage = enabled)
+            syncLocalStateToCloud(silent = true)
+        }
+    }
+
+    fun setSubtitleFilterLanguage(language: String) {
+        viewModelScope.launch {
+            context.settingsDataStore.edit { prefs ->
+                prefs[subtitleFilterLanguageKey()] = language
+            }
+            _uiState.value = _uiState.value.copy(subtitleFilterLanguage = language)
             syncLocalStateToCloud(silent = true)
         }
     }
@@ -1461,7 +1494,7 @@ class SettingsViewModel @Inject constructor(
             "cloudflare", "cloudflare dns", "cloudflare_dns" -> "cloudflare"
             "google" -> "google"
             "adguard", "ad guard" -> "adguard"
-            else -> "system"
+            else -> "cloudflare"
         }
     }
 

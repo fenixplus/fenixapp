@@ -172,6 +172,8 @@ fun MediaCard(
             .crossfade(false)
             .build()
     }
+    var artworkIsOpaque by remember(imageRequest) { mutableStateOf(false) }
+
     // Performance: Removed context/density from keys
     val effectiveLogoImageUrl = logoImageUrl.takeIf { showLogoImage }
     val logoRequest = remember(effectiveLogoImageUrl) {
@@ -232,7 +234,7 @@ fun MediaCard(
                               else Modifier.background(missingArtworkBrush)),
                     contentAlignment = Alignment.Center
                 ) {
-                    if (!isProviderLogo && (artworkPainter == null && imageRequest == null)) {
+                    if (!isProviderLogo && (artworkPainter == null && (imageRequest == null || !artworkIsOpaque))) {
                         Text(
                             text = item.title,
                             style = ArvioSkin.typography.cardTitle,
@@ -255,6 +257,13 @@ fun MediaCard(
                         model = imageRequest,
                         contentDescription = item.title,
                         contentScale = if (isProviderLogo) ContentScale.Fit else ContentScale.Crop,
+                        onError = {
+                            artworkIsOpaque = false
+                        },
+                        onSuccess = {
+                            // Keep the fallback behind transparent artwork and crossfades.
+                            artworkIsOpaque = it.result.drawable.opacity == android.graphics.PixelFormat.OPAQUE
+                        },
                         modifier = Modifier.fillMaxSize().then(
                             if (isProviderLogo) Modifier.padding(horizontal = width * 0.22f, vertical = 24.dp)
                             else Modifier
@@ -721,9 +730,20 @@ fun FeaturedMediaCard(
     trailerDelayMs: Long,
     trailerVolume: Float,
     onClick: () -> Unit,
+    // The expanded size, so the artwork size does not change while [width] animates.
+    artworkWidth: Dp = width,
+    autoplayNotBeforeMs: Long? = null,
 ) {
     val shape = rememberArvioCardShape(ArvioSkin.radius.md)
     val imageUrl = (item.backdrop ?: item.image).takeIf { it.isNotBlank() }
+
+    // Remaining focus delay, fixed when the card opens so recompositions don't restart it.
+    val startDelayMs = remember(item.id, item.mediaType, trailerKey) {
+        autoplayNotBeforeMs?.let { (it - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0L) }
+            ?: trailerDelayMs
+    }
+    // The player is mounted only once expansion has reached its final size.
+    val expanded = kotlin.math.abs(width.value - artworkWidth.value) < 0.5f
 
     ArvioFocusableSurface(
         modifier = Modifier.size(width, height),
@@ -746,10 +766,10 @@ fun FeaturedMediaCard(
                 modifier = Modifier.fillMaxSize()
             )
         }
-        if (trailerKey != null) {
+        if (trailerKey != null && expanded) {
             TrailerPlayer(
                 youtubeKey = trailerKey,
-                delayMs = trailerDelayMs,
+                delayMs = startDelayMs,
                 volume = trailerVolume,
                 modifier = Modifier.fillMaxSize()
             )

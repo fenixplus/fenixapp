@@ -611,8 +611,7 @@ class SportsRepository @Inject constructor(
         const val MAX_CATALOGS_PER_LOAD = 3
         const val CATEGORY_ARTWORK_TIMEOUT_MS = 1_500L
 
-        fun drawable(name: String): String =
-            "android.resource://com.fenix.plus/drawable/$name"
+        fun drawable(name: String): String = ""
     }
 }
 

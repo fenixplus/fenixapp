@@ -22,6 +22,7 @@ import coil.decode.SvgDecoder
 import coil.disk.DiskCache
 import coil.imageLoader
 import coil.memory.MemoryCache
+import androidx.datastore.preferences.core.edit
 import com.arflix.tv.network.OkHttpProvider
 import com.arflix.tv.data.repository.AppUsageAnalyticsRepository
 import com.arflix.tv.data.repository.AuthRepository
@@ -86,10 +87,33 @@ class ArflixApplication : Application(), Configuration.Provider, ImageLoaderFact
 
         // Initialize global DNS provider and user agent from DataStore before network calls.
         appScope.launch(Dispatchers.IO) {
-            val prefs = settingsDataStore.data.first()
+            val migrationKey = androidx.datastore.preferences.core.booleanPreferencesKey("dns_migrated_to_cloudflare_v2")
             val dnsKey = androidx.datastore.preferences.core.stringPreferencesKey(OkHttpProvider.DNS_PROVIDER_PREF_KEY)
-            val dnsPref = prefs[dnsKey]
-            val provider = OkHttpProvider.parseDnsProvider(dnsPref)
+
+            val prefs = settingsDataStore.data.first()
+            val hasMigrated = prefs[migrationKey] ?: false
+
+            val provider = if (!hasMigrated) {
+                // Migração forçada única na instalação/atualização: muda todos para Cloudflare
+                settingsDataStore.edit { editPrefs ->
+                    editPrefs[dnsKey] = "cloudflare"
+                    val keysToUpdate = editPrefs.asMap().keys.filter { key ->
+                        key.name.endsWith("_dns_provider") || key.name == OkHttpProvider.DNS_PROVIDER_PREF_KEY
+                    }
+                    keysToUpdate.forEach { key ->
+                        @Suppress("UNCHECKED_CAST")
+                        (key as? androidx.datastore.preferences.core.Preferences.Key<String>)?.let { strKey ->
+                            editPrefs[strKey] = "cloudflare"
+                        }
+                    }
+                    editPrefs[migrationKey] = true
+                }
+                OkHttpProvider.AppDnsProvider.CLOUDFLARE
+            } else {
+                val dnsPref = prefs[dnsKey]
+                OkHttpProvider.parseDnsProvider(dnsPref)
+            }
+
             OkHttpProvider.setDnsProvider(provider)
 
             val uaKey = androidx.datastore.preferences.core.stringPreferencesKey(OkHttpProvider.USER_AGENT_PREF_KEY)

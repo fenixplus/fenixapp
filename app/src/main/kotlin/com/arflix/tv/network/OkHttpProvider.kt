@@ -81,7 +81,7 @@ object OkHttpProvider {
     private var appContext: Context? = null
 
     @Volatile
-    private var selectedDnsProvider: AppDnsProvider = AppDnsProvider.SYSTEM
+    private var selectedDnsProvider: AppDnsProvider = AppDnsProvider.CLOUDFLARE
 
     @Volatile
     private var _customUserAgent: String = ""
@@ -388,7 +388,7 @@ object OkHttpProvider {
             "cloudflare", "cloudflare dns", "cloudflare_dns" -> AppDnsProvider.CLOUDFLARE
             "google" -> AppDnsProvider.GOOGLE
             "adguard", "ad guard" -> AppDnsProvider.ADGUARD
-            else -> AppDnsProvider.SYSTEM
+            else -> AppDnsProvider.CLOUDFLARE
         }
     }
 

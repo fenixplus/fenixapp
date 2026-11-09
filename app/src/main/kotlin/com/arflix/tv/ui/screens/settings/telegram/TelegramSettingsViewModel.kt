@@ -8,8 +8,10 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import javax.inject.Inject
@@ -25,6 +27,9 @@ class TelegramSettingsViewModel @Inject constructor(
 
     private val _cacheSizeBytes = MutableStateFlow(0L)
     val cacheSizeBytes: StateFlow<Long> = _cacheSizeBytes.asStateFlow()
+
+    val cacheLimitMb: StateFlow<Long> = repository.getCacheLimitMb()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), repository.getDefaultCacheLimitMb())
 
     init {
         refreshCacheSize()
@@ -44,6 +49,13 @@ class TelegramSettingsViewModel @Inject constructor(
         }
     }
 
+    fun setCacheLimitMb(mb: Long) {
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.setCacheLimitMb(mb)
+            _cacheSizeBytes.value = repository.getCacheSize()
+        }
+    }
+
     fun clearCache() {
         viewModelScope.launch(Dispatchers.IO) {
             repository.clearCache()
@@ -51,7 +63,7 @@ class TelegramSettingsViewModel @Inject constructor(
         }
     }
 
-    private fun refreshCacheSize() {
+    fun refreshCacheSize() {
         viewModelScope.launch(Dispatchers.IO) {
             _cacheSizeBytes.value = repository.getCacheSize()
         }

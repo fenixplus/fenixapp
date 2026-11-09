@@ -815,11 +815,54 @@ fun PlayerScreen(
             .setDefaultRequestProperties(baseRequestHeaders)
     }
     val mediaCache = remember(context) { PlaybackCacheSingleton.getInstance(context) }
-    // Wrap the OkHttp factory so file:// URIs also work — matched subtitles are served from a
+    val tdDataSourceFactory = remember(viewModel.telegramClient, viewModel.downloadManager, viewModel.telegramRepository) {
+        com.arflix.tv.player.telegram.TdDataSource.Factory(
+            client = viewModel.telegramClient,
+            isDownloadingCheck = { fileId -> viewModel.isDownloading(fileId) },
+            onFileOpened = { fileId -> viewModel.telegramRepository.onVideoLoading(fileId) }
+        )
+    }
+    // Composite factory: routes tdfile:// directly to TdDataSource (in-memory/NIO streaming from TDLib)
+    // and http/https to OkHttpDataSource.
+    val compositeDataSourceFactory = remember(httpDataSourceFactory, tdDataSourceFactory) {
+        androidx.media3.datasource.DataSource.Factory {
+            val httpSource = httpDataSourceFactory.createDataSource()
+            val tdSource = tdDataSourceFactory.createDataSource()
+            object : androidx.media3.datasource.DataSource {
+                private var activeSource: androidx.media3.datasource.DataSource? = null
+
+                override fun addTransferListener(transferListener: androidx.media3.datasource.TransferListener) {
+                    httpSource.addTransferListener(transferListener)
+                    tdSource.addTransferListener(transferListener)
+                }
+
+                override fun open(dataSpec: androidx.media3.datasource.DataSpec): Long {
+                    val isTd = dataSpec.uri.scheme?.equals("tdfile", ignoreCase = true) == true
+                    val source = if (isTd) tdSource else httpSource
+                    activeSource = source
+                    return source.open(dataSpec)
+                }
+
+                override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+                    return activeSource?.read(buffer, offset, length) ?: androidx.media3.common.C.RESULT_END_OF_INPUT
+                }
+
+                override fun getUri(): android.net.Uri? = activeSource?.uri
+
+                override fun getResponseHeaders(): Map<String, List<String>> =
+                    activeSource?.responseHeaders ?: emptyMap()
+
+                override fun close() {
+                    activeSource?.close()
+                    activeSource = null
+                }
+            }
+        }
+    }
+    // Wrap the composite factory so file:// URIs also work — matched subtitles are served from a
     // local cache file (already downloaded by the scan) instead of re-fetching addon servers.
-    // http/https still routes through the same OkHttp client as before.
-    val fileCapableDataSourceFactory = remember(httpDataSourceFactory) {
-        androidx.media3.datasource.DefaultDataSource.Factory(context, httpDataSourceFactory)
+    val fileCapableDataSourceFactory = remember(compositeDataSourceFactory) {
+        androidx.media3.datasource.DefaultDataSource.Factory(context, compositeDataSourceFactory)
     }
     val cacheDataSourceFactory = remember(fileCapableDataSourceFactory, mediaCache) {
         CacheDataSource.Factory()
@@ -857,11 +900,11 @@ fun PlayerScreen(
 
     // Non-cached factory for heavy/debrid progressive streams to avoid disk I/O bottleneck.
     // The DV variant only differs by the rewriting ExtractorsFactory (MKV-only inside).
-    val directProgressiveFactory = remember(httpDataSourceFactory) {
-        ProgressiveMediaSource.Factory(httpDataSourceFactory)
+    val directProgressiveFactory = remember(compositeDataSourceFactory) {
+        ProgressiveMediaSource.Factory(compositeDataSourceFactory)
     }
-    val directProgressiveDvFactory = remember(httpDataSourceFactory, dvStripExtractorsFactory) {
-        dvStripExtractorsFactory?.let { ProgressiveMediaSource.Factory(httpDataSourceFactory, it) }
+    val directProgressiveDvFactory = remember(compositeDataSourceFactory, dvStripExtractorsFactory) {
+        dvStripExtractorsFactory?.let { ProgressiveMediaSource.Factory(compositeDataSourceFactory, it) }
     }
 
     // Protocol-specific media source factories for faster startup
@@ -1114,16 +1157,16 @@ fun PlayerScreen(
                     override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                         if (playerReleasedAtomic.get()) return
 
-                        // AUTO SOFTWARE FALLBACK: If decoding fails (common on Unisoc chips with HEVC),
-                        // retry the SAME source once with FFmpeg (software) forced before skipping.
+                        // AUTO SOFTWARE FALLBACK: If decoding fails (common on Unisoc chips with HEVC or unsupported AV1/VC1/DolbyVision),
+                        // retry the SAME source once with NextLib/FFmpeg (software) forced before skipping.
                         // We check !preferExtensionDecoder to ensure we only trigger this once.
-                        if ((error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODING_FAILED ||
-                             error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODER_INIT_FAILED ||
-                             error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES) &&
-                            !preferExtensionDecoder) {
-                            
+                        val isDecoderFail = error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODING_FAILED ||
+                            error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODER_INIT_FAILED ||
+                            error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES ||
+                            error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED
+                        if (isDecoderFail && !preferExtensionDecoder) {
                             val pos = try { this@apply.currentPosition } catch (_: Exception) { -1L }
-                            Log.i("PlayerDiagnostics", "🎬 auto-software-fallback: decoding failed (code=${error.errorCode}), triggering recreation for software retry at ${pos}ms")
+                            Log.i("PlayerDiagnostics", "🎬 auto-software-fallback: decoding failed (code=${error.errorCode}), triggering recreation for NextLib/FFmpeg software retry at ${pos}ms")
                             
                             autoFallbackPosition = pos
                             localPreferSoftwareDecoder = true
@@ -1825,6 +1868,7 @@ fun PlayerScreen(
             // - DASH/Progressive: dedicated factories for optimal handling
             val isHeavy = isLikelyHeavyStream(latestUiState.selectedStream)
             val isRemoteHttp = urlLower.startsWith("http://") || urlLower.startsWith("https://")
+            val isTdFile = urlLower.startsWith("tdfile://")
             val mediaSource: MediaSource = when {
                 // Sidecar subtitle configs only merge through a DefaultMediaSourceFactory; the
                 // preload variant streams video uncached (like directProgressiveFactory) and
@@ -1835,7 +1879,7 @@ fun PlayerScreen(
                     hlsFactory.createMediaSource(mediaItem)
                 isDashStream ->
                     dashFactory.createMediaSource(mediaItem)
-                isHeavy || isRemoteHttp ->
+                isHeavy || isRemoteHttp || isTdFile ->
                     // Bypass disk cache for large/debrid progressive streams to avoid I/O
                     // bottleneck. The DV variant additionally rewrites DV P7 MKUs to their
                     // HDR10 base layer (enabled-check happens inside the extractors factory).
@@ -2522,6 +2566,9 @@ fun PlayerScreen(
                 val restoreLevel = volumeBeforeMute.coerceAtLeast(1)
                 runCatching { audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, restoreLevel, 0) }
             }
+            coroutineScope.launch {
+                viewModel.telegramRepository.onPlaybackStopped()
+            }
         }
     }
 
@@ -3119,11 +3166,11 @@ fun PlayerScreen(
                                 "Cyan" -> android.graphics.Color.CYAN
                                 else -> android.graphics.Color.WHITE
                             }
-                            val subTypeface = when (subtitleStylePref) {
-                                "Normal" -> android.graphics.Typeface.DEFAULT
-                                "Background" -> android.graphics.Typeface.DEFAULT_BOLD
-                                else -> android.graphics.Typeface.DEFAULT_BOLD
-                            }
+                            val subTypeface = resolveSubtitleTypeface(
+                                ctx,
+                                uiState.subtitleFont,
+                                subtitleStylePref != "Normal"
+                            )
                             val subEdgeType = when (subtitleStylePref) {
                                 "Normal" -> androidx.media3.ui.CaptionStyleCompat.EDGE_TYPE_NONE
                                 "Background" -> androidx.media3.ui.CaptionStyleCompat.EDGE_TYPE_NONE
@@ -4795,6 +4842,34 @@ private fun findPreferredAudioTrackIndex(
     audioTracks: List<AudioTrackInfo>,
     preferredCode: String
 ): Int? {
+    val normalizedPref = preferredCode.lowercase().trim()
+    if (normalizedPref == "pt-br" || normalizedPref == "pob") {
+        // 1. Try Portuguese (Brazil) first
+        val brHints = listOf("pt-br", "pt_br", "ptbr", "pob", "brazil", "brasil", "brazilian", "dublado", "dub")
+        val brIndex = audioTracks.indexOfFirst { track ->
+            val trackLang = track.language?.lowercase()?.trim().orEmpty()
+            val label = track.label?.lowercase()?.trim().orEmpty()
+            trackLang == "pt-br" || trackLang == "pob" ||
+                trackLang.contains("brazil") || trackLang.contains("brasil") ||
+                brHints.any { hint -> label.contains(hint) }
+        }
+        if (brIndex >= 0) return brIndex
+
+        // 2. Fallback to Portuguese (pt / por)
+        val ptHints = listOf("português", "portugues", "por", "pt")
+        val ptIndex = audioTracks.indexOfFirst { track ->
+            val trackLang = track.language?.lowercase()?.trim().orEmpty()
+            val label = track.label?.lowercase()?.trim().orEmpty()
+            trackLang == "pt" || trackLang == "por" ||
+                trackLang.startsWith("portuguese") ||
+                ptHints.any { hint -> label.contains(hint) }
+        }
+        if (ptIndex >= 0) return ptIndex
+
+        // 3. Fallback to Auto / Original / default track (returns null so default track is kept)
+        return null
+    }
+
     val prefName = getFullLanguageName(preferredCode)
     if (prefName == "Unknown") return null
     val labelHints = nativeAudioLanguageHints(preferredCode) + prefName.lowercase()
@@ -4823,7 +4898,8 @@ private fun nativeAudioLanguageHints(preferredCode: String): List<String> {
         "French" -> listOf("français", "francais")
         "Spanish" -> listOf("español", "espanol", "castellano")
         "Italian" -> listOf("italiano")
-        "Portuguese" -> listOf("português", "portugues")
+        "Portuguese" -> listOf("português", "portugues", "dublado", "dub")
+        "Portuguese (Brazil)" -> listOf("pt-br", "ptbr", "brazil", "brasil", "brazilian", "dublado", "dub", "português", "portugues")
         "Czech" -> listOf("čeština", "cesky", "dabing")
         else -> emptyList()
     }
@@ -6005,6 +6081,13 @@ private fun estimateInitialStartupTimeoutMs(
 
     val sizeBytes = parseSizeToBytes(stream.size)
 
+    val isTelegram = stream.addonId.contains("telegram", ignoreCase = true) ||
+        stream.source.contains("telegram", ignoreCase = true)
+
+    if (isTelegram) {
+        timeoutMs = timeoutMs.coerceAtLeast(if (isManualSelection) 120_000L else 90_000L)
+    }
+
     if (haystack.contains("4k") || haystack.contains("2160")) {
         timeoutMs = timeoutMs.coerceAtLeast(if (isManualSelection) 70_000L else 45_000L)
     }
@@ -6021,7 +6104,8 @@ private fun estimateInitialStartupTimeoutMs(
         else -> timeoutMs
     }
 
-    return timeoutMs.coerceAtMost(if (isManualSelection) 120_000L else 80_000L)
+    val maxCap = if (isTelegram) 180_000L else if (isManualSelection) 120_000L else 80_000L
+    return timeoutMs.coerceAtMost(maxCap)
 }
 
 private fun playbackErrorMessageFor(

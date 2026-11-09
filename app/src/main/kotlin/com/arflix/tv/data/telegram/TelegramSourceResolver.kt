@@ -145,7 +145,7 @@ class TelegramSourceResolver @Inject constructor(
                 if (score < SCORE_THRESHOLD) null else msg
             }
             .map { msg ->
-                val streamUrl = repository.getStreamUrl(msg.fileId)
+                val streamUrl = repository.getStreamUrl(msg.fileId, fileName = msg.fileName, remoteId = msg.remoteFileId)
                 val displayName = if (msg.fileName == "Default_Name.mkv" || msg.fileName == "Default_Name.mp4")
                     msg.caption.takeIf { it.isNotBlank() } ?: msg.fileName
                 else msg.fileName

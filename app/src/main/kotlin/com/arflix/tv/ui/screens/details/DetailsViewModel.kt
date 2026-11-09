@@ -27,7 +27,9 @@ import com.arflix.tv.data.repository.ProfileManager
 import com.arflix.tv.data.repository.StreamRepository
 import com.arflix.tv.data.repository.providerScopedStreamIdentity
 import com.arflix.tv.data.repository.TraktRepository
+import com.arflix.tv.data.telegram.TelegramClient
 import com.arflix.tv.data.telegram.TelegramRepository
+import com.arflix.tv.player.telegram.ExternalPlayer
 import android.content.Intent
 import com.arflix.tv.data.repository.WatchHistoryRepository
 import com.arflix.tv.data.repository.WatchlistRepository
@@ -205,8 +207,10 @@ class DetailsViewModel @Inject constructor(
     private val cloudSyncRepository: CloudSyncRepository,
     private val launcherContinueWatchingRepository: LauncherContinueWatchingRepository,
     private val fenixRepository: com.arflix.tv.data.telegram.FenixRepository,
+    private val telegramClient: TelegramClient,
     private val telegramRepository: TelegramRepository,
-    private val kidsContentFilter: KidsContentFilter
+    private val kidsContentFilter: KidsContentFilter,
+    private val downloadManager: com.arflix.tv.data.download.DownloadManager
 ) : ViewModel() {
 
     init {
@@ -221,6 +225,23 @@ class DetailsViewModel @Inject constructor(
 
     fun launchExternalPlayer(context: Context, stream: StreamSource) {
         viewModelScope.launch {
+            val rawUrl = stream.url ?: return@launch
+            if (rawUrl.startsWith("tdfile://")) {
+                val uri = android.net.Uri.parse(rawUrl)
+                val fileId = uri.authority?.toIntOrNull() ?: uri.lastPathSegment?.toIntOrNull()
+                if (fileId != null && fileId > 0) {
+                    val mimeType = uri.getQueryParameter("type") ?: "video/*"
+                    ExternalPlayer.handOver(
+                        context = context,
+                        client = telegramClient,
+                        fileId = fileId,
+                        title = _uiState.value.item?.title ?: "",
+                        mimeType = mimeType
+                    )
+                    return@launch
+                }
+            }
+
             ensureTelegramProxyReady(stream)
             val resolvedResult = runCatching {
                 streamRepository.resolveStreamForPlayback(stream)
@@ -1236,6 +1257,62 @@ class DetailsViewModel @Inject constructor(
             toastMessage = message,
             toastType = type
         )
+    }
+
+    fun downloadStream(stream: StreamSource, episode: Episode?) {
+        val url = stream.url.orEmpty()
+        val fileId = when {
+            url.startsWith("tdfile://") -> android.net.Uri.parse(url).authority?.toIntOrNull()
+            url.contains("/file/") -> url.substringAfter("/file/").substringBefore("?").substringBefore("/").toIntOrNull()
+            else -> null
+        }
+
+        if (fileId == null) {
+            showToast("Não foi possível identificar o arquivo deste stream", ToastType.ERROR)
+            return
+        }
+
+        val currentItem = _uiState.value.item
+        val mediaType = currentItem?.mediaType ?: MediaType.MOVIE
+        val mediaId = currentItem?.id ?: 0
+        val baseTitle = currentItem?.title ?: ""
+        val title = if (mediaType == MediaType.TV && episode != null) {
+            "$baseTitle - T${episode.seasonNumber}:E${episode.episodeNumber}"
+        } else {
+            baseTitle
+        }
+        val subtitle = if (mediaType == MediaType.TV && episode != null) {
+            episode.name.ifBlank { stream.source }
+        } else {
+            stream.quality.ifBlank { stream.source }
+        }
+        val posterUrl = episode?.stillPath ?: currentItem?.image
+        val sourceName = stream.behaviorHints?.filename?.takeIf { it.isNotBlank() } ?: stream.source
+        val audioTag = com.arflix.tv.data.download.DownloadItem.parseAudioLabel(stream.source, stream.description, stream.rawLabel)
+        val remoteFileId = android.net.Uri.parse(url).getQueryParameter("remote")
+
+        val enqueued = downloadManager.enqueueDownload(
+            fileId = fileId,
+            remoteFileId = remoteFileId,
+            mediaType = mediaType,
+            mediaId = mediaId,
+            title = title,
+            subtitle = subtitle,
+            seasonNumber = episode?.seasonNumber,
+            episodeNumber = episode?.episodeNumber,
+            posterUrl = posterUrl,
+            quality = stream.quality,
+            streamUrl = url,
+            totalBytes = stream.sizeBytes ?: 0L,
+            sourceTitle = sourceName,
+            audioLabel = audioTag
+        )
+
+        if (enqueued) {
+            showToast(context.getString(R.string.download_queued_toast), ToastType.SUCCESS)
+        } else {
+            showToast(context.getString(R.string.download_already_downloaded), ToastType.INFO)
+        }
     }
 
     private fun isPendingDebridStream(stream: StreamSource): Boolean {
@@ -2970,6 +3047,12 @@ class DetailsViewModel @Inject constructor(
     }
 
     private suspend fun ensureTelegramProxyReady(stream: StreamSource?) {
+        val streamUrl = stream?.url
+        if (streamUrl != null && streamUrl.startsWith("tdfile://")) {
+            // Direct native TdDataSource — no HTTP proxy required
+            return
+        }
+
         val isTelegram = stream?.addonId == "telegram_native" || 
                         stream?.addonId == "fenix_bot_native" ||
                         stream?.url?.contains("127.0.0.1") == true

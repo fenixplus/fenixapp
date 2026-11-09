@@ -216,6 +216,7 @@ fun DetailsScreen(
     onNavigateToSearch: () -> Unit = {},
     onNavigateToWatchlist: () -> Unit = {},
     onNavigateToTv: () -> Unit = {},
+    onNavigateToDownloads: () -> Unit = {},
     onNavigateToSettings: () -> Unit = {},
     onSwitchProfile: () -> Unit = {},
     onBack: () -> Unit
@@ -261,6 +262,11 @@ fun DetailsScreen(
 
     // Stream Selector state
     var showStreamSelector by remember { mutableStateOf(false) }
+    var selectedStreamSeason by remember { mutableStateOf<Int?>(null) }
+    var selectedStreamEpisode by remember { mutableStateOf<Int?>(null) }
+    var selectedStreamPositionMs by remember { mutableStateOf<Long?>(null) }
+    var selectedStreamFenixEpisodeId by remember { mutableStateOf<Int?>(null) }
+
     var showTrailerPlayer by remember { mutableStateOf(false) }
     KeepScreenOn(active = showTrailerPlayer)
     var pendingAutoPlayRequest by remember { mutableStateOf<PendingAutoPlayRequest?>(null) }
@@ -276,6 +282,10 @@ fun DetailsScreen(
 
     fun requestFastAutoPlay(imdbId: String?, season: Int?, episode: Int?, startPositionMs: Long?, fenixEpisodeId: Int? = null) {
         showStreamSelector = false
+        selectedStreamSeason = season
+        selectedStreamEpisode = episode
+        selectedStreamPositionMs = startPositionMs
+        selectedStreamFenixEpisodeId = fenixEpisodeId
         viewModel.loadStreams(imdbId, season, episode, fenixEpisodeId = fenixEpisodeId)
         autoPlayWaitTick = 0
         pendingAutoPlayRequest = PendingAutoPlayRequest(
@@ -445,6 +455,15 @@ fun DetailsScreen(
         }
     }
 
+    // Sync episodeIndex with initialEpisodeIndex from ViewModel
+    LaunchedEffect(uiState.initialEpisodeIndex, uiState.episodes) {
+        if (uiState.initialEpisodeIndex >= 0 && uiState.episodes.isNotEmpty()) {
+            if (uiState.currentSeason == uiState.initialSeasonIndex + 1) {
+                episodeIndex = uiState.initialEpisodeIndex.coerceIn(0, uiState.episodes.lastIndex)
+            }
+        }
+    }
+
     // Reflect the episodes of the season the user is MOVING to, not only the one they click. The
     // 100ms debounce means stepping quickly through seasons (1→4) cancels the intermediate loads
     // and only fetches the season they settle on. loadSeason() ignores duplicate/in-flight requests
@@ -486,36 +505,54 @@ fun DetailsScreen(
                         state.playPositionMs
                     } else null
 
+                    val fenixEpId = if (state.isFenixMode) {
+                        state.episodes.firstOrNull { it.seasonNumber == season && it.episodeNumber == episode }?.id
+                            ?: state.playFenixEpisodeId
+                    } else null
+
+                    selectedStreamSeason = season
+                    selectedStreamEpisode = episode
+                    selectedStreamPositionMs = startPositionMs
+                    selectedStreamFenixEpisodeId = fenixEpId
+
                     if (!state.autoPlaySingleSource) {
                         // Autoplay OFF → open the source picker; never auto-play.
                         showStreamSelector = true
-                        val ep = state.episodes.getOrNull(currentEpIdx)
                         viewModel.loadStreams(
                             state.imdbId, 
                             season, 
                             episode,
-                            fenixEpisodeId = if (state.isFenixMode) ep?.id else null
+                            fenixEpisodeId = fenixEpId
                         )
                     } else {
                         // Autoplay ON → go straight to the player; PlayerScreen auto-picks.
-                        val ep = state.episodes.getOrNull(currentEpIdx)
                         requestFastAutoPlay(
                             state.imdbId, 
                             season, 
                             episode, 
                             startPositionMs,
-                            fenixEpisodeId = if (state.isFenixMode) ep?.id else null
+                            fenixEpisodeId = fenixEpId
                         )
                     }
                 }
                 1 -> { // Sources
-                    showStreamSelector = true
                     val ep = state.episodes.getOrNull(currentEpIdx)
+                    val s = if (mediaType == MediaType.TV) ep?.seasonNumber ?: state.playSeason ?: 1 else null
+                    val e = if (mediaType == MediaType.TV) ep?.episodeNumber ?: state.playEpisode ?: 1 else null
+                    val pos = if (mediaType == MediaType.TV && s == state.playSeason && e == state.playEpisode) state.playPositionMs else if (mediaType == MediaType.MOVIE) state.playPositionMs else null
+                    val fId = if (state.isFenixMode) ep?.id ?: state.playFenixEpisodeId else null
+
+                    selectedStreamSeason = s
+                    selectedStreamEpisode = e
+                    selectedStreamPositionMs = pos
+                    selectedStreamFenixEpisodeId = fId
+
+                    showStreamSelector = true
                     viewModel.loadStreams(
                         state.imdbId, 
-                        ep?.seasonNumber, 
-                        ep?.episodeNumber,
-                        fenixEpisodeId = if (state.isFenixMode) ep?.id else null
+                        s, 
+                        e,
+                        fenixEpisodeId = fId
                     )
                 }
                 2 -> { // Trailer
@@ -553,13 +590,16 @@ fun DetailsScreen(
             val ep = state.episodes.getOrNull(idx)
             if (ep != null) {
                 episodeIndex = idx
-                // ALWAYS show source menu when clicking a specific episode in the list
+                selectedStreamSeason = ep.seasonNumber
+                selectedStreamEpisode = ep.episodeNumber
+                selectedStreamPositionMs = if (ep.seasonNumber == state.playSeason && ep.episodeNumber == state.playEpisode) state.playPositionMs else null
+                selectedStreamFenixEpisodeId = if (state.isFenixMode) ep.id else null
                 showStreamSelector = true
                 viewModel.loadStreams(
                     state.imdbId, 
                     ep.seasonNumber, 
                     ep.episodeNumber,
-                    fenixEpisodeId = if (state.isFenixMode) ep.id else null
+                    fenixEpisodeId = selectedStreamFenixEpisodeId
                 )
             }
         }
@@ -825,6 +865,7 @@ fun DetailsScreen(
                                         SidebarItem.HOME -> onNavigateToHome()
                                         SidebarItem.WATCHLIST -> onNavigateToWatchlist()
                                         SidebarItem.TV -> onNavigateToTv()
+                                        SidebarItem.DOWNLOADS -> onNavigateToDownloads()
                                         SidebarItem.SETTINGS -> onNavigateToSettings()
                                         null -> Unit
                                     }
@@ -854,6 +895,15 @@ fun DetailsScreen(
                                             } else if (mediaType == MediaType.MOVIE) {
                                                 uiState.playPositionMs
                                             } else null
+                                            val fenixEpId = if (uiState.isFenixMode) {
+                                                uiState.episodes.firstOrNull { it.seasonNumber == season && it.episodeNumber == episode }?.id
+                                                    ?: uiState.playFenixEpisodeId
+                                            } else null
+
+                                            selectedStreamSeason = season
+                                            selectedStreamEpisode = episode
+                                            selectedStreamPositionMs = startPositionMs
+                                            selectedStreamFenixEpisodeId = fenixEpId
 
                                             if (!uiState.autoPlaySingleSource) {
                                                 // Autoplay OFF → open the source picker; never auto-play.
@@ -862,7 +912,7 @@ fun DetailsScreen(
                                                     uiState.imdbId, 
                                                     season, 
                                                     episode,
-                                                    fenixEpisodeId = if (uiState.isFenixMode) uiState.playFenixEpisodeId else null
+                                                    fenixEpisodeId = fenixEpId
                                                 )
                                             } else {
                                                 // Autoplay ON: pick a concrete stream first, then open PlayerScreen.
@@ -871,20 +921,29 @@ fun DetailsScreen(
                                                     season, 
                                                     episode, 
                                                     startPositionMs,
-                                                    fenixEpisodeId = if (uiState.isFenixMode) uiState.playFenixEpisodeId else null
+                                                    fenixEpisodeId = fenixEpId
                                                 )
                                             }
                                         }
                                         1 -> { // Sources - Show StreamSelector for manual selection
-                                            showStreamSelector = true
-                                            // Pass the currently focused episode for TV shows
                                             val ep = uiState.episodes.getOrNull(episodeIndex)
+                                            val s = if (mediaType == MediaType.TV) ep?.seasonNumber ?: uiState.playSeason ?: 1 else null
+                                            val e = if (mediaType == MediaType.TV) ep?.episodeNumber ?: uiState.playEpisode ?: 1 else null
+                                            val pos = if (mediaType == MediaType.TV && s == uiState.playSeason && e == uiState.playEpisode) uiState.playPositionMs else if (mediaType == MediaType.MOVIE) uiState.playPositionMs else null
+                                            val fId = if (uiState.isFenixMode) ep?.id ?: uiState.playFenixEpisodeId else null
+
+                                            selectedStreamSeason = s
+                                            selectedStreamEpisode = e
+                                            selectedStreamPositionMs = pos
+                                            selectedStreamFenixEpisodeId = fId
+
+                                            showStreamSelector = true
                                             viewModel.loadStreams(
-                                            uiState.imdbId, 
-                                            ep?.seasonNumber, 
-                                            ep?.episodeNumber,
-                                            fenixEpisodeId = if (uiState.isFenixMode) ep?.id else null
-                                        )
+                                                uiState.imdbId, 
+                                                s, 
+                                                e,
+                                                fenixEpisodeId = fId
+                                            )
                                         }
                                         2 -> { // Trailer
                                             uiState.trailerKey?.let {
@@ -902,13 +961,18 @@ fun DetailsScreen(
                                 FocusSection.EPISODES -> {
                                     val ep = uiState.episodes.getOrNull(episodeIndex)
                                     if (ep != null) {
+                                        selectedStreamSeason = ep.seasonNumber
+                                        selectedStreamEpisode = ep.episodeNumber
+                                        selectedStreamPositionMs = if (ep.seasonNumber == uiState.playSeason && ep.episodeNumber == uiState.playEpisode) uiState.playPositionMs else null
+                                        selectedStreamFenixEpisodeId = if (uiState.isFenixMode) ep.id else null
+
                                         // ALWAYS show source menu when clicking a specific episode in the list (TV mode)
                                         showStreamSelector = true
                                         viewModel.loadStreams(
                                             uiState.imdbId, 
                                             ep.seasonNumber, 
                                             ep.episodeNumber,
-                                            fenixEpisodeId = if (uiState.isFenixMode) ep.id else null
+                                            fenixEpisodeId = selectedStreamFenixEpisodeId
                                         )
                                     }
                                 }
@@ -1126,19 +1190,55 @@ fun DetailsScreen(
                     return@StreamSelector
                 }
                 showStreamSelector = false
-                val ep = uiState.episodes.getOrNull(episodeIndex)
-                viewModel.recordPlayedEpisode(mediaId, ep?.seasonNumber, ep?.episodeNumber)
+
+                val targetSeason = if (mediaType == MediaType.TV) {
+                    selectedStreamSeason
+                        ?: uiState.playSeason
+                        ?: uiState.episodes.getOrNull(episodeIndex)?.seasonNumber
+                        ?: 1
+                } else null
+
+                val targetEpisode = if (mediaType == MediaType.TV) {
+                    selectedStreamEpisode
+                        ?: uiState.playEpisode
+                        ?: uiState.episodes.getOrNull(episodeIndex)?.episodeNumber
+                        ?: 1
+                } else null
+
+                val targetPositionMs = if (
+                    mediaType == MediaType.TV &&
+                    targetSeason == uiState.playSeason &&
+                    targetEpisode == uiState.playEpisode
+                ) {
+                    selectedStreamPositionMs ?: uiState.playPositionMs
+                } else if (mediaType == MediaType.MOVIE) {
+                    selectedStreamPositionMs ?: uiState.playPositionMs
+                } else null
+
+                val targetFenixEpId = selectedStreamFenixEpisodeId
+                    ?: if (uiState.isFenixMode) {
+                        uiState.episodes.firstOrNull { it.seasonNumber == targetSeason && it.episodeNumber == targetEpisode }?.id
+                            ?: uiState.playFenixEpisodeId
+                    } else null
+
+                viewModel.recordPlayedEpisode(mediaId, targetSeason, targetEpisode)
                 onNavigateToPlayer(
                     mediaType, mediaId,
-                    ep?.seasonNumber, ep?.episodeNumber,
+                    targetSeason, targetEpisode,
                     uiState.imdbId,
                     stream.url?.takeIf { it.isNotBlank() },
                     stream.addonId.takeIf { it.isNotBlank() },
                     stream.source.takeIf { it.isNotBlank() },
-                    null,
-                    if (uiState.isFenixMode) ep?.id else null
+                    targetPositionMs,
+                    targetFenixEpId
                 )
             },
+            onDownload = if (isMobile) { stream ->
+                val targetEp = uiState.episodes.firstOrNull {
+                    it.seasonNumber == selectedStreamSeason && it.episodeNumber == selectedStreamEpisode
+                } ?: uiState.episodes.getOrNull(episodeIndex)
+                viewModel.downloadStream(stream, targetEp)
+            } else null,
             onClose = { showStreamSelector = false }
         )
 
@@ -1161,12 +1261,16 @@ fun DetailsScreen(
                 },
                 onSelectSource = {
                     showEpisodeContextMenu = false
+                    selectedStreamSeason = episode.seasonNumber
+                    selectedStreamEpisode = episode.episodeNumber
+                    selectedStreamPositionMs = if (episode.seasonNumber == uiState.playSeason && episode.episodeNumber == uiState.playEpisode) uiState.playPositionMs else null
+                    selectedStreamFenixEpisodeId = if (uiState.isFenixMode) episode.id else null
                     showStreamSelector = true
                     viewModel.loadStreams(
                         uiState.imdbId, 
                         episode.seasonNumber, 
                         episode.episodeNumber,
-                        fenixEpisodeId = if (uiState.isFenixMode) episode.id else null
+                        fenixEpisodeId = selectedStreamFenixEpisodeId
                     )
                 },
                 onToggleWatched = {

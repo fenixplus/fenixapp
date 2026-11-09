@@ -41,7 +41,8 @@ import javax.inject.Singleton
  */
 @Singleton
 class TelegramStreamingProxy @Inject constructor(
-    private val client: TelegramClient
+    private val client: TelegramClient,
+    private val downloadManager: com.arflix.tv.data.download.DownloadManager
 ) {
     companion object {
         private const val TAG = "TelegramProxy"
@@ -206,6 +207,13 @@ class TelegramStreamingProxy @Inject constructor(
         gateHandled.remove(fileId)
         fileMutexes.remove(fileId)
         lastRequestedOffsets.remove(fileId)
+
+        // Protect active user downloads in DownloadManager!
+        if (downloadManager.isDownloading(fileId)) {
+            Log.d(TAG, "File $fileId is downloading in background, skipping proxy cancellation/deletion")
+            return
+        }
+
         runCatching {
             client.sendRequest(TdApi.CancelDownloadFile().also { req ->
                 req.fileId = fileId
@@ -214,7 +222,7 @@ class TelegramStreamingProxy @Inject constructor(
         }
         runCatching {
             client.sendRequest(TdApi.DeleteFile().also { it.fileId = fileId })
-            Log.d(TAG, "Deleted cached file $fileId")
+            Log.d(TAG, "Deleted cached streaming file $fileId")
         }
     }
 
@@ -268,33 +276,26 @@ class TelegramStreamingProxy @Inject constructor(
         val isMetadata = totalSize > 0 && offset > (totalSize - warmupSize - 1024 * 1024)
         
         // --- METADATA GATE ---
-        // If this is a normal data request (not metadata) and metadata isn't ready yet,
-        // we block the request until the metadata prefetch (index) is fully cached.
-        // This ensures the Telegram connection is dedicated to the vital index first.
-        if (!isMetadata && totalSize > warmupSize && !metadataReady.contains(fileId)) {
-            Log.d(TAG, "🛑 [PROXY] Prioritizing metadata search. Waiting for index (offset=$offset)...")
-            val gateTimeoutMs = 45_000L // 45s safety timeout
+        // If this is a request for the beginning of the file (offset == 0) and metadata is not yet ready,
+        // we give a small grace window (max 3 seconds) for the end-of-file index to arrive.
+        // If it takes longer, we DO NOT stall or abort: we release immediately so MKVs, webm, and
+        // fast-start MP4s (whose index is already at the beginning) can start playing right away
+        // without waiting for the end of the file.
+        if (!isMetadata && totalSize > warmupSize && !metadataReady.contains(fileId) && offset == 0L) {
+            Log.d(TAG, "🛑 [PROXY] Fast-checking metadata for fileId=$fileId (offset=$offset)...")
+            val gateTimeoutMs = 3_000L // 3s non-blocking grace window
             val gateStartTime = System.currentTimeMillis()
             
             while (System.currentTimeMillis() - gateStartTime < gateTimeoutMs) {
                 if (metadataReady.contains(fileId)) {
-                    Log.d(TAG, "🟢 [PROXY] Metadata ready, releasing request for offset=$offset")
+                    Log.d(TAG, "🟢 [PROXY] Metadata ready early, proceeding with offset=$offset")
                     break
                 }
-                
-                // If the user switched to another movie while we were waiting, abort immediately
                 if (lastStreamedFileId != fileId) {
                     Log.d(TAG, "🛑 [PROXY] Aborting wait: file changed (fileId=$fileId)")
                     return null
                 }
-                
-                delay(200)
-            }
-            
-            if (!metadataReady.contains(fileId)) {
-                Log.w(TAG, "⚠️ [PROXY] Metadata gate timed out after ${gateTimeoutMs/1000}s. Aborting.")
-                _errorState.value = "Conexão com o Telegram está lenta ou instável. Tente novamente ou escolha outra fonte."
-                return null
+                delay(150)
             }
         }
 

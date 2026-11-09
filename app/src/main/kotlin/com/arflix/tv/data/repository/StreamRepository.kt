@@ -361,6 +361,10 @@ class StreamRepository @Inject constructor(
         val entryKey = streamResultCacheEntryKey(cacheKey)
         val raw = context.streamDataStore.data.first()[streamResultCacheBundleKey(profileId)].orEmpty()
         val payload = decodeStreamResultCacheBundle(raw)[entryKey] ?: return@withContext null
+        if (payload.streams.any { it.url?.startsWith("tdfile://") == true }) {
+            Log.d(TAG, "[StreamCache][Load] discarding persisted cache with session tdfile: key=$cacheKey")
+            return@withContext null
+        }
         val cached = CachedStreamResult(
             result = StreamResult(payload.streams, payload.subtitles),
             createdAtMs = payload.createdAtMs
@@ -369,6 +373,10 @@ class StreamRepository @Inject constructor(
     }
 
     private fun persistStreamResult(profileId: String, cacheKey: String, cached: CachedStreamResult) {
+        if (cached.result.streams.any { it.url?.startsWith("tdfile://") == true }) {
+            Log.d(TAG, "[StreamCache][Persist] skipping persistence for tdfile streams: key=$cacheKey")
+            return
+        }
         val entryKey = streamResultCacheEntryKey(cacheKey)
         val payload = PersistedStreamResultPayload(
             streams = cached.result.streams,
@@ -3323,6 +3331,10 @@ class StreamRepository @Inject constructor(
      * Resolve a single stream for playback - with timeout to prevent hanging forever
      */
     suspend fun resolveStreamForPlayback(stream: StreamSource): StreamSource? = withContext(Dispatchers.IO) {
+        val streamUrl = stream.url?.trim().orEmpty()
+        if (streamUrl.startsWith("tdfile://", ignoreCase = true)) {
+            return@withContext stream
+        }
         cachedResolvedStream(stream)?.let { return@withContext it }
         try {
             withTimeout(STREAM_RESOLUTION_TIMEOUT_MS) {

@@ -288,7 +288,7 @@ class CloudSyncRepository @Inject constructor(
         val spoilerBlurEnabled: Boolean = false,
         val volumeBoostDb: Int = 0,
         val includeSpecials: Boolean = false,
-        val dnsProvider: String = "system",
+        val dnsProvider: String = "cloudflare",
         val subtitleUsageJson: String = "",
         val subtitleSettingsUpdatedAt: Long = 0L,
         val secondarySubtitle: String = "Off",
@@ -588,7 +588,7 @@ class CloudSyncRepository @Inject constructor(
         val prefs = context.settingsDataStore.data.first()
         val root = JSONObject()
         val profiles = profileRepository.getProfiles()
-        val globalDnsProvider = prefs[globalDnsProviderKey] ?: prefs[dnsProviderKey()] ?: "system"
+        val globalDnsProvider = prefs[globalDnsProviderKey] ?: prefs[dnsProviderKey()] ?: "cloudflare"
 
         // Per-profile settings
         val profileSettingsById = buildMap<String, CloudProfileSettings> {
@@ -597,7 +597,7 @@ class CloudSyncRepository @Inject constructor(
                     profile.id,
                     CloudProfileSettings(
                         defaultSubtitle = prefs[defaultSubtitleKeyFor(profile.id)] ?: "Off",
-                        defaultAudioLanguage = prefs[defaultAudioLanguageKeyFor(profile.id)] ?: "Auto (Original)",
+                        defaultAudioLanguage = prefs[defaultAudioLanguageKeyFor(profile.id)] ?: "Portuguese (Brazil)",
                         contentLanguage = prefs[contentLanguageKeyFor(profile.id)] ?: "pt-BR",
 
                         trailerAutoPlay = prefs[trailerAutoPlayKeyFor(profile.id)] ?: false,
@@ -644,7 +644,7 @@ class CloudSyncRepository @Inject constructor(
         root.put("updatedAt", System.currentTimeMillis())
         // Legacy flat fields (for backward compat with older clients)
         root.put("defaultSubtitle", prefs[defaultSubtitleKey()] ?: "Off")
-        root.put("defaultAudioLanguage", prefs[defaultAudioLanguageKey()] ?: "Auto (Original)")
+        root.put("defaultAudioLanguage", prefs[defaultAudioLanguageKey()] ?: "Portuguese (Brazil)")
         root.put("cardLayoutMode", normalizeCardLayoutMode(prefs[cardLayoutModeKey()] ?: CARD_LAYOUT_MODE_LANDSCAPE))
         root.put("frameRateMatchingMode", prefs[frameRateMatchingModeKey()] ?: "Off")
         root.put("autoPlayNext", prefs[autoPlayNextKey()] ?: true)
@@ -1164,7 +1164,7 @@ class CloudSyncRepository @Inject constructor(
                         state.showLoadingStats?.let { prefs[showLoadingStatsKeyFor(profileId)] = it }
                         prefs[spoilerBlurKeyFor(profileId)] = state.spoilerBlurEnabled
                         prefs[volumeBoostDbKeyFor(profileId)] = state.volumeBoostDb.coerceIn(0, 15).toString()
-                        prefs[dnsProviderKeyFor(profileId)] = state.dnsProvider.ifBlank { "system" }
+                        prefs[dnsProviderKeyFor(profileId)] = state.dnsProvider.ifBlank { "cloudflare" }
                         if (state.subtitleUsageJson.isBlank()) {
                             prefs.remove(subtitleUsageKeyFor(profileId))
                         } else {

@@ -720,30 +720,52 @@ class FenixRepository @Inject constructor(
                             val resTitle: String?
                             val resDesc: String?
 
+                            val detectedQuality: String
                             when (res) {
                                 is TdApi.InlineQueryResultDocument -> {
                                     file = res.document.document
                                     fileName = res.document.fileName
                                     resTitle = res.title
                                     resDesc = res.description
+                                    detectedQuality = parseQuality(resDesc ?: "")
+                                        .ifBlank { parseQuality(fileName) }
+                                        .ifBlank { parseQuality(resTitle ?: "") }
                                 }
                                 is TdApi.InlineQueryResultVideo -> {
                                     file = res.video.video
                                     fileName = res.video.fileName
                                     resTitle = res.title
                                     resDesc = res.description
+                                    val w = res.video.width
+                                    val h = res.video.height
+                                    detectedQuality = when {
+                                        h >= 2160 || w >= 3840 -> "4K"
+                                        h >= 1080 || w >= 1900 -> "FHD"
+                                        h >= 720 || w >= 1200 -> "HD"
+                                        h >= 480 || w >= 640 -> "SD"
+                                        else -> parseQuality(resDesc ?: "")
+                                            .ifBlank { parseQuality(fileName) }
+                                            .ifBlank { parseQuality(resTitle ?: "") }
+                                    }
                                 }
                                 else -> continue
                             }
 
+                            val mimeType = when (res) {
+                                is TdApi.InlineQueryResultVideo -> res.video.mimeType
+                                is TdApi.InlineQueryResultDocument -> res.document.mimeType
+                                else -> ""
+                            }
                             val title = resTitle ?: fileName
-                            val streamUrl = telegramProxy.getUrl(file.id)
+                            val streamType = com.arflix.tv.player.telegram.streamType(mimeType, fileName)
+                            val remoteId = file.remote?.id
+                            val streamUrl = com.arflix.tv.player.telegram.tdFileUri(file.id, streamType, remoteId).toString()
                             streams.add(
                                 StreamSource(
                                     source = title,
                                     addonName = context.getString(R.string.fenix_bot_source),
                                     addonId = "fenix_bot_native",
-                                    quality = parseQuality(title),
+                                    quality = detectedQuality,
                                     size = formatBytes(file.size),
                                     sizeBytes = file.size,
                                     url = streamUrl,
@@ -777,9 +799,9 @@ class FenixRepository @Inject constructor(
         val t = name.lowercase()
         return when {
             t.contains("4k") || t.contains("2160") -> "4K"
-            t.contains("1080") -> "1080p"
-            t.contains("720") -> "720p"
-            t.contains("480") -> "480p"
+            t.contains("1080") || t.contains("fhd") -> "FHD"
+            t.contains("720") || t.contains("hd") -> "HD"
+            t.contains("480") || t.contains("sd") -> "SD"
             else -> ""
         }
     }

@@ -85,6 +85,7 @@ fun WatchlistScreen(
     onNavigateToHome: () -> Unit = {},
     onNavigateToSearch: () -> Unit = {},
     onNavigateToTv: () -> Unit = {},
+    onNavigateToDownloads: () -> Unit = {},
     onNavigateToSettings: () -> Unit = {},
     onSwitchProfile: () -> Unit = {},
     onBack: () -> Unit = {}
@@ -244,6 +245,7 @@ fun WatchlistScreen(
                                         SidebarItem.HOME -> onNavigateToHome()
                                         SidebarItem.WATCHLIST -> {}
                                         SidebarItem.TV -> onNavigateToTv()
+                                        SidebarItem.DOWNLOADS -> onNavigateToDownloads()
                                         SidebarItem.SETTINGS -> onNavigateToSettings()
                                         null -> Unit
                                     }

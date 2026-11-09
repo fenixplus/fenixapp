@@ -242,6 +242,9 @@
 # ============================================
 # App-specific keeps
 # ============================================
+# Keep NextLib FFmpeg renderers looked up reflectively
+-keep class io.github.anilbeesetti.nextlib.media3ext.** { *; }
+
 # Keep app exception classes for crash reporting
 -keep class com.arflix.tv.util.AppException { *; }
 -keep class com.arflix.tv.util.AppException$* { *; }

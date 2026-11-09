@@ -32,8 +32,8 @@ import com.arflix.tv.ui.screens.collections.CollectionDetailsScreen
 import com.arflix.tv.ui.screens.search.SearchScreen
 import com.arflix.tv.ui.screens.settings.SettingsScreen
 import com.arflix.tv.ui.screens.settings.telegram.TelegramSettingsScreen
-import com.arflix.tv.ui.screens.tv.live.LiveTvScreen
 import com.arflix.tv.ui.screens.watchlist.WatchlistScreen
+import com.arflix.tv.ui.screens.downloads.DownloadsScreen
 import com.arflix.tv.ui.screens.profile.ProfileSelectionScreen
 import com.arflix.tv.ui.screens.profile.PinEntryDialog
 import com.arflix.tv.util.PinUtil
@@ -56,6 +56,7 @@ sealed class Screen(val route: String) {
     data object Home : Screen("home")
     data object Search : Screen("search")
     data object Watchlist : Screen("watchlist")
+    data object Downloads : Screen("downloads")
     data object CollectionDetails : Screen("collections/{catalogId}") {
         fun createRoute(catalogId: String): String {
             return "collections/${android.net.Uri.encode(catalogId)}"
@@ -249,6 +250,9 @@ fun AppNavigation(
                 onNavigateToWatchlist = {
                     navigateTopLevel(Screen.Watchlist.route)
                 },
+                onNavigateToDownloads = {
+                    navigateTopLevel(Screen.Downloads.route)
+                },
                 onNavigateToTv = { channelId, streamUrl ->
                     navigateTopLevel(Screen.Tv.createRoute(channelId, streamUrl))
                 },
@@ -282,6 +286,7 @@ fun AppNavigation(
                 },
                 onNavigateToHome = { navigateHome() },
                 onNavigateToWatchlist = { navigateTopLevel(Screen.Watchlist.route) },
+                onNavigateToDownloads = { navigateTopLevel(Screen.Downloads.route) },
                 onNavigateToTv = { navigateTopLevel(Screen.Tv.createRoute()) },
                 onNavigateToSettings = { navigateTopLevel(Screen.Settings.route) },
                 onSwitchProfile = protectedOnSwitchProfile,
@@ -298,6 +303,7 @@ fun AppNavigation(
                 },
                 onNavigateToHome = { navigateHome() },
                 onNavigateToSearch = { navigateTopLevel(Screen.Search.route) },
+                onNavigateToDownloads = { navigateTopLevel(Screen.Downloads.route) },
                 onNavigateToTv = { navigateTopLevel(Screen.Tv.createRoute()) },
                 onNavigateToSettings = { navigateTopLevel(Screen.Settings.route) },
                 onSwitchProfile = protectedOnSwitchProfile,
@@ -305,28 +311,42 @@ fun AppNavigation(
             )
         }
 
-        // TV screen
+        // TV screen (stub / no-op)
         composable(
             route = Screen.Tv.route,
             arguments = listOf(
                 navArgument("channelId") { type = NavType.StringType; nullable = true; defaultValue = null },
                 navArgument("streamUrl") { type = NavType.StringType; nullable = true; defaultValue = null }
             )
-        ) { backStackEntry ->
-            val initialChannelId = backStackEntry.arguments?.getString("channelId")
-            val initialStreamUrl = backStackEntry.arguments?.getString("streamUrl")
-            LiveTvScreen(
+        ) {
+            LaunchedEffect(Unit) {
+                navController.popBackStack()
+            }
+        }
+
+        // Downloads screen
+        composable(Screen.Downloads.route) {
+            DownloadsScreen(
                 currentProfile = currentProfile,
-                initialChannelId = initialChannelId,
-                initialStreamUrl = initialStreamUrl,
-                onFullscreenChanged = onTvFullscreenChanged,
+                onNavigateToPlayer = { mediaType, mediaId, season, episode, url, title ->
+                    navController.navigate(
+                        Screen.Player.createRoute(
+                            mediaType = mediaType,
+                            mediaId = mediaId,
+                            seasonNumber = season,
+                            episodeNumber = episode,
+                            streamUrl = url,
+                            preferredSourceName = title
+                        )
+                    )
+                },
                 onNavigateToHome = { navigateHome() },
                 onNavigateToSearch = { navigateTopLevel(Screen.Search.route) },
                 onNavigateToWatchlist = { navigateTopLevel(Screen.Watchlist.route) },
+                onNavigateToTv = { navigateTopLevel(Screen.Tv.createRoute()) },
                 onNavigateToSettings = { navigateTopLevel(Screen.Settings.route) },
-                onNavigateToIptvSettings = { navigateTopLevel(Screen.Settings.createRoute(initialSection = "iptv")) },
                 onSwitchProfile = protectedOnSwitchProfile,
-                onBack = { navController.popBackStack() }
+                onBack = { navigateHome() }
             )
         }
 
@@ -385,6 +405,7 @@ fun AppNavigation(
                     onNavigateToSearch = { navigateTopLevel(Screen.Search.route) },
                     onNavigateToTv = { navigateTopLevel(Screen.Tv.createRoute()) },
                     onNavigateToWatchlist = { navigateTopLevel(Screen.Watchlist.route) },
+                    onNavigateToDownloads = { navigateTopLevel(Screen.Downloads.route) },
                     onNavigateToTelegramSettings = { navController.navigate(Screen.TelegramSettings.route) },
                     onSwitchProfile = protectedOnSwitchProfile,
                     onBack = { navController.popBackStack() }
@@ -562,6 +583,11 @@ fun AppNavigation(
                 onNavigateToWatchlist = {
                     if (!navController.popBackStack(Screen.Watchlist.route, inclusive = false)) {
                         navigateTopLevel(Screen.Watchlist.route)
+                    }
+                },
+                onNavigateToDownloads = {
+                    if (!navController.popBackStack(Screen.Downloads.route, inclusive = false)) {
+                        navigateTopLevel(Screen.Downloads.route)
                     }
                 },
                 onNavigateToSettings = {

@@ -163,6 +163,7 @@ fun SearchScreen(
     onNavigateToHome: () -> Unit = {},
     onNavigateToWatchlist: () -> Unit = {},
     onNavigateToTv: () -> Unit = {},
+    onNavigateToDownloads: () -> Unit = {},
     onNavigateToSettings: () -> Unit = {},
     onSwitchProfile: () -> Unit = {},
     onBack: () -> Unit = {}
@@ -777,6 +778,7 @@ fun SearchScreen(
                                 SidebarItem.HOME -> onNavigateToHome()
                                 SidebarItem.WATCHLIST -> onNavigateToWatchlist()
                                 SidebarItem.TV -> onNavigateToTv()
+                                SidebarItem.DOWNLOADS -> onNavigateToDownloads()
                                 SidebarItem.SETTINGS -> onNavigateToSettings()
                                 null -> Unit
                             }

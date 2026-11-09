@@ -41,6 +41,8 @@ import com.arflix.tv.data.repository.WatchHistoryRepository
 import com.arflix.tv.data.repository.WatchlistRepository
 import com.arflix.tv.data.telegram.FenixRepository
 import com.arflix.tv.data.telegram.TelegramRepository
+import com.arflix.tv.network.TmdbPriorityDispatcher
+import com.arflix.tv.network.TmdbPriorityDispatcher.Priority
 import com.arflix.tv.util.AppLogger
 import com.arflix.tv.util.Constants
 import com.arflix.tv.util.DeviceType
@@ -134,6 +136,7 @@ enum class ToastType {
 @OptIn(ExperimentalCoroutinesApi::class)
 class HomeViewModel @Inject constructor(
     private val mediaRepository: MediaRepository,
+    private val tmdbPriorityDispatcher: TmdbPriorityDispatcher,
     private val catalogRepository: CatalogRepository,
     private val streamRepository: StreamRepository,
     private val sportsRepository: SportsRepository,
@@ -2234,14 +2237,22 @@ class HomeViewModel @Inject constructor(
                     Log.d("HomeVM", "No filtered TMDB content found, injecting dedicated Fenix rows.")
                     
                     val movieItems = fenixCatalog.movies.take(30).mapNotNull { id ->
-                        runCatching { mediaRepository.getMovieDetails(id) }.getOrNull()
+                        runCatching { 
+                            tmdbPriorityDispatcher.withPermit(Priority.DEFERRED) {
+                                mediaRepository.getMovieDetails(id) 
+                            }
+                        }.getOrNull()
                     }
                     if (movieItems.isNotEmpty()) {
                         finalCategories.add(Category(id = "fenix_movies", title = "Filmes do Bot", items = movieItems))
                     }
 
                     val seriesItems = fenixCatalog.series.take(30).mapNotNull { id ->
-                        runCatching { mediaRepository.getTvDetails(id) }.getOrNull()
+                        runCatching { 
+                            tmdbPriorityDispatcher.withPermit(Priority.DEFERRED) {
+                                mediaRepository.getTvDetails(id) 
+                            }
+                        }.getOrNull()
                     }
                     if (seriesItems.isNotEmpty()) {
                         finalCategories.add(Category(id = "fenix_series", title = "Séries do Bot", items = seriesItems))
@@ -2255,7 +2266,9 @@ class HomeViewModel @Inject constructor(
                 val heroLogoUrl = heroItem?.let { item ->
                     val key = "${item.mediaType}_${item.id}"
                     getCachedLogo(key) ?: run {
-                        val logo = mediaRepository.getLogoUrl(item.mediaType, item.id)
+                        val logo = tmdbPriorityDispatcher.withPermit(Priority.BACKGROUND) { 
+                            mediaRepository.getLogoUrl(item.mediaType, item.id) 
+                        }
                         if (logo != null) putCachedLogo(key, logo)
                         logo
                     }
@@ -2325,7 +2338,11 @@ class HomeViewModel @Inject constructor(
         val key = "${item.mediaType}_${item.id}_${item.nextEpisode?.seasonNumber ?: 1}"
         if (!prefetchedDetailsKeys.add(key)) return
         viewModelScope.launch(networkDispatcher) {
-            runCatching { mediaRepository.getLogoUrl(item.mediaType, item.id) }
+            runCatching { 
+                tmdbPriorityDispatcher.withPermit(Priority.BACKGROUND) { 
+                    mediaRepository.getLogoUrl(item.mediaType, item.id) 
+                }
+            }
             if (item.mediaType == MediaType.TV) {
                 val season = item.nextEpisode?.seasonNumber ?: 1
                 runCatching { mediaRepository.getSeasonEpisodes(item.id, season) }
@@ -2521,7 +2538,9 @@ class HomeViewModel @Inject constructor(
                 async(networkDispatcher) {
                     val key = "${item.mediaType}_${item.id}"
                     try {
-                        val logoUrl = mediaRepository.getLogoUrl(item.mediaType, item.id)
+                        val logoUrl = tmdbPriorityDispatcher.withPermit(Priority.BACKGROUND) {
+                            mediaRepository.getLogoUrl(item.mediaType, item.id)
+                        }
                         if (logoUrl != null) key to logoUrl else null
                     } catch (e: Exception) {
                 if (e is CancellationException) throw e
@@ -2579,15 +2598,19 @@ class HomeViewModel @Inject constructor(
                     
                     val result = if (categoryId.startsWith("kids_") || categoryId.startsWith("trending_") || (catalog?.isPreinstalled == true && catalog.sourceUrl.isNullOrBlank())) {
                         // Pure TMDB preinstalled/kids catalog
-                        mediaRepository.loadHomeCategoryPage(categoryId, currentPageToFetch)
+                        tmdbPriorityDispatcher.withPermit(Priority.IMMEDIATE) {
+                            mediaRepository.loadHomeCategoryPage(categoryId, currentPageToFetch)
+                        }
                     } else {
                         // MDBList/custom catalog
                         val cfg = catalog ?: break
-                        mediaRepository.loadCustomCatalogPage(
-                            catalog = cfg,
-                            offset = (currentPageToFetch - 1) * pageSize, // Approximate offset
-                            limit = pageSize
-                        )
+                        tmdbPriorityDispatcher.withPermit(Priority.IMMEDIATE) {
+                            mediaRepository.loadCustomCatalogPage(
+                                catalog = cfg,
+                                offset = (currentPageToFetch - 1) * pageSize, // Approximate offset
+                                limit = pageSize
+                            )
+                        }
                     }
 
                     if (result.items.isEmpty()) {
@@ -2639,7 +2662,11 @@ class HomeViewModel @Inject constructor(
                     if (!isActionableMediaItem(item) || isIptvItem(item)) return@mapNotNull null
                     val key = "${item.mediaType}_${item.id}"
                     if (hasCachedLogo(key) || !logoFetchInFlight.add(key)) return@mapNotNull null
-                    val logo = runCatching { mediaRepository.getLogoUrl(item.mediaType, item.id) }.getOrNull()
+                    val logo = runCatching { 
+                        tmdbPriorityDispatcher.withPermit(Priority.BACKGROUND) { 
+                            mediaRepository.getLogoUrl(item.mediaType, item.id) 
+                        }
+                    }.getOrNull()
                     logoFetchInFlight.remove(key)
                     if (logo == null) return@mapNotNull null
                     key to logo
@@ -3594,7 +3621,9 @@ class HomeViewModel @Inject constructor(
             if (currentCachedLogo == null && isActionableMediaItem(item) && !isIptvItem(item)) {
                 try {
                     val logoUrl = withContext(networkDispatcher) {
-                        mediaRepository.getLogoUrl(item.mediaType, item.id)
+                        tmdbPriorityDispatcher.withPermit(Priority.BACKGROUND) {
+                            mediaRepository.getLogoUrl(item.mediaType, item.id)
+                        }
                     }
                     if (logoUrl != null && _uiState.value.heroItem?.id == item.id) {
                         putCachedLogo(cacheKey, logoUrl)
@@ -3838,7 +3867,9 @@ class HomeViewModel @Inject constructor(
                     async(networkDispatcher) {
                         val key = "${item.mediaType}_${item.id}"
                         try {
-                            val logoUrl = mediaRepository.getLogoUrl(item.mediaType, item.id)
+                            val logoUrl = tmdbPriorityDispatcher.withPermit(Priority.BACKGROUND) {
+                                mediaRepository.getLogoUrl(item.mediaType, item.id)
+                            }
                             if (logoUrl != null) key to logoUrl else null
                         } catch (e: Exception) {
                 if (e is CancellationException) throw e
@@ -3910,7 +3941,9 @@ class HomeViewModel @Inject constructor(
                         async(networkDispatcher) {
                             val key = "${item.mediaType}_${item.id}"
                             try {
-                                val logoUrl = mediaRepository.getLogoUrl(item.mediaType, item.id)
+                                val logoUrl = tmdbPriorityDispatcher.withPermit(Priority.BACKGROUND) {
+                                    mediaRepository.getLogoUrl(item.mediaType, item.id)
+                                }
                                 if (logoUrl != null) key to logoUrl else null
                             } catch (e: Exception) {
                                 if (e is CancellationException) throw e

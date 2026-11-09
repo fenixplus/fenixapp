@@ -718,9 +718,18 @@ fun ArflixApp(
             AppBottomBar(
                 currentRoute = currentRoute,
                 onNavigate = { route ->
-                    navController.navigate(route) {
-                        popUpTo("home") { inclusive = false }
-                        launchSingleTop = true
+                    if (route == "home") {
+                        navController.navigate("home") {
+                            popUpTo("home") { inclusive = true; saveState = false }
+                            launchSingleTop = true
+                            restoreState = false
+                        }
+                    } else {
+                        navController.navigate(route) {
+                            popUpTo("home") { saveState = true }
+                            launchSingleTop = true
+                            restoreState = true
+                        }
                     }
                 },
                 modifier = Modifier.fillMaxWidth()

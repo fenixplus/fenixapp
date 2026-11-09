@@ -1,6 +1,5 @@
 package com.arflix.tv.util
 
-import io.sentry.SentryLevel
 import java.io.InterruptedIOException
 import java.net.ConnectException
 import java.net.NoRouteToHostException
@@ -92,13 +91,6 @@ object CrashReportFilter {
 
     fun shouldReportHandledException(throwable: Throwable): Boolean {
         return dropReasonForHandledException(throwable) == null
-    }
-
-    fun shouldSendSentryEvent(throwable: Throwable?, level: SentryLevel?): Boolean {
-        if (throwable == null) return true
-        if (isAlwaysIgnored(throwable)) return false
-        if (level == SentryLevel.FATAL) return true
-        return shouldReportHandledException(throwable)
     }
 
     fun shouldSampleHandledException(throwable: Throwable, context: Map<String, String> = emptyMap()): Boolean {

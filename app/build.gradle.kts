@@ -29,8 +29,8 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         minSdk = 23
         targetSdk = 36
-        versionCode = 108
-        versionName = "1.0.8"
+        versionCode = 109
+        versionName = "1.0.9"
         buildConfigField("String", "GITHUB_OWNER", "\"fenixplus\"")
         buildConfigField("String", "GITHUB_REPO", "\"fenixapp\"")
         buildConfigField("Boolean", "FEATURE_PLUGINS_ENABLED", "false")
@@ -38,10 +38,10 @@ android {
         // idle realtime polling off Supabase unless explicitly re-enabled.
         buildConfigField("Boolean", "ENABLE_TMDB_EDGE_PROXY", "false")
         buildConfigField("Boolean", "ENABLE_TRAKT_EDGE_PROXY", "false")
-        buildConfigField("Boolean", "ENABLE_REALTIME_CLOUD_SYNC", "true")
+        buildConfigField("Boolean", "ENABLE_REALTIME_CLOUD_SYNC", "false")
         buildConfigField("Boolean", "ENABLE_REALTIME_WATCH_SYNC", "false")
         buildConfigField("Boolean", "ENABLE_PERIODIC_CLOUD_PULL", "false")
-        buildConfigField("Boolean", "ENABLE_NETLIFY_CLOUD_SYNC", "true")
+        buildConfigField("Boolean", "ENABLE_NETLIFY_CLOUD_SYNC", "false")
         buildConfigField("Boolean", "ENABLE_SUPABASE_SYNC_MIRROR", "false")
         buildConfigField("String", "NETLIFY_BACKEND_URL", "\"https://auth.arvio.tv/.netlify/functions\"")
         // The daily "app_open" usage event inherited from ARVIO posts to NETLIFY_BACKEND_URL,
@@ -57,9 +57,9 @@ android {
         buildConfigField("String", "TELEGRAM_API_HASH", "\"${escapeBuildConfigString(localSecretValue("TELEGRAM_API_HASH"))}\"")
 
 
-        // Support both 32-bit and 64-bit devices (required for Google Play since 2019)
+        // Support both 32-bit and 64-bit ARM devices (modern phones/TVs and 32-bit sticks)
         ndk {
-            abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+            abiFilters += listOf("armeabi-v7a", "arm64-v8a")
         }
 
         vectorDrawables {
@@ -80,7 +80,7 @@ android {
             dimension = "distribution"
             isDefault = true
             buildConfigField("Boolean", "SELF_UPDATE_ENABLED", "true")
-            buildConfigField("Boolean", "FEATURE_PLUGINS_ENABLED", "true")
+            buildConfigField("Boolean", "FEATURE_PLUGINS_ENABLED", "false")
         }
     }
 
@@ -295,11 +295,9 @@ ksp {
     implementation("androidx.media3:media3-ui:$media3Version")
     implementation("androidx.media3:media3-session:$media3Version")
     implementation("androidx.media3:media3-common:$media3Version")
-    // FFmpeg extension for software decoding of DTS/TrueHD/Atmos/HEVC/DV.
-    // Keep this only in the sideload build. The Play Store build must comply
-    // with 16 KB memory page support, and the current prebuilt native library
-    // (libffmpegJNI.so) is the likely source of the Play Console warning.
-    add("sideloadImplementation", "org.jellyfin.media3:media3-ffmpeg-decoder:1.9.0+1")
+    // FFmpeg extension (NextLib Media3 Extension) for software decoding of
+    // DTS/DTS-HD/TrueHD/AC3/E-AC3 and video formats (AV1, VP9, etc.).
+    implementation("io.github.anilbeesetti:nextlib-media3ext:1.9.0-0.10.0")
 
     // Networking - Retrofit + OkHttp
     implementation("com.squareup.retrofit2:retrofit:2.9.0")
@@ -358,31 +356,10 @@ ksp {
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
 
-    // Firebase Crashlytics - optional, works when google-services.json is present
-    implementation(platform("com.google.firebase:firebase-bom:32.7.0"))
-    implementation("com.google.firebase:firebase-crashlytics-ktx")
-
-    // Sentry crash reporting. Runtime initialization is gated by BuildConfig.ENABLE_CRASH_REPORTING
-    // and SENTRY_DSN from secrets.properties/secrets.defaults.properties.
-    implementation("io.sentry:sentry-android:8.40.0")
-
     baselineProfile(project(":benchmark"))
 
     // NanoHTTPD – lightweight HTTP server for QR-based AI key setup
     implementation("org.nanohttpd:nanohttpd:2.3.1")
-
-    // Plugin system dependencies (Sideload flavor only)
-    add("sideloadImplementation", files("libs/quickjs-kt-android-1.0.5-nuvio.aar"))
-    add("sideloadImplementation", "com.fasterxml.jackson.core:jackson-databind:2.18.12")
-    add("sideloadImplementation", "com.fasterxml.jackson.module:jackson-module-kotlin:2.18.12")
-    add("sideloadImplementation", "com.github.Blatzar:NiceHttp:0.4.11")
-    add("sideloadImplementation", "org.conscrypt:conscrypt-android:2.5.3")
-    add("sideloadImplementation", "com.github.recloudstream.cloudstream:library-android:v4.7.0") {
-        exclude(group = "org.mozilla", module = "rhino")
-    }
-    add("sideloadImplementation", "org.mozilla:rhino:1.8.1")
-    add("sideloadImplementation", "com.google.re2j:re2j:1.8")
-    add("sideloadImplementation", "org.webjars.npm:crypto-js:4.2.0")
 
     // Unit Testing
     testImplementation("junit:junit:4.13.2")
@@ -486,21 +463,6 @@ kotlin {
 dependencies {
     ksp("org.jetbrains.kotlin:kotlin-metadata-jvm:2.3.0")
     annotationProcessor("org.jetbrains.kotlin:kotlin-metadata-jvm:2.3.0")
-
-    // Plugin system dependencies (Sideload flavor only)
-    add("sideloadImplementation", files("libs/quickjs-kt-android-1.0.5-nuvio.aar"))
-    add("sideloadImplementation", "com.fasterxml.jackson.core:jackson-databind:2.18.12")
-    add("sideloadImplementation", "com.fasterxml.jackson.module:jackson-module-kotlin:2.18.12")
-    add("sideloadImplementation", "com.github.Blatzar:NiceHttp:0.4.11")
-    add("sideloadImplementation", "org.conscrypt:conscrypt-android:2.5.3")
-    add("sideloadImplementation", "com.github.recloudstream.cloudstream:library-android:v4.7.0") {
-        exclude(group = "org.mozilla", module = "rhino")
-    }
-    add("sideloadImplementation", "org.webjars.npm:crypto-js:4.2.0")
-    
-    // Runtime helpers used by the sideload plugin extractor stack.
-    add("sideloadImplementation", "org.mozilla:rhino:1.8.1")
-    add("sideloadImplementation", "com.google.re2j:re2j:1.8")
 }
 
 

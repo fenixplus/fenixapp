@@ -1,14 +1,20 @@
 package com.arflix.tv.ui.screens.player
 
 import android.content.Context
+import android.media.AudioFormat
+import android.media.AudioTrack
 import android.os.Handler
+import androidx.media3.common.audio.ChannelMixingAudioProcessor
+import androidx.media3.common.audio.ChannelMixingMatrix
 import androidx.media3.common.text.Cue
 import androidx.media3.common.text.CueGroup
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.Renderer
 import androidx.media3.exoplayer.audio.AudioRendererEventListener
 import androidx.media3.exoplayer.audio.AudioSink
+import androidx.media3.exoplayer.audio.AudioTrackAudioOutputProvider
 import androidx.media3.exoplayer.audio.DefaultAudioSink
+import androidx.media3.exoplayer.audio.DefaultAudioTrackBufferSizeProvider
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.text.TextOutput
 import androidx.media3.exoplayer.video.VideoRendererEventListener
@@ -73,17 +79,71 @@ class AiSubtitleRenderersFactory(
         eventListener: AudioRendererEventListener,
         out: ArrayList<Renderer>
     ) {
-        // EXTENSION_RENDERER_MODE_PREFER exists only for the Amlogic/SEI *video* C2 decoder hang
-        // (PlayerScreen preferExtensionDecoder). For AUDIO, FFmpeg-first software-decodes every
-        // E-AC3/TrueHD/DTS stream to PCM — killing AVR bitstream passthrough — and jellyfin-ffmpeg's
-        // TrueHD path fails outright. Always build audio with mode ON: the platform
-        // MediaCodecAudioRenderer (whose DefaultAudioSink auto-detects AVR capabilities and
-        // bitstreams via bypass) goes first; FFmpeg stays strictly a fallback for codecs the
-        // device can neither passthrough nor decode.
+        val hardwareStartIndex = out.size
         super.buildAudioRenderers(
             context, EXTENSION_RENDERER_MODE_ON, mediaCodecSelector,
             enableDecoderFallback, audioSink, eventHandler, eventListener, out
         )
+
+        if (extensionRendererMode == EXTENSION_RENDERER_MODE_OFF) return
+
+        // DYNAMIC INJECTION: NextLib / FFmpeg Audio Renderer
+        // Media3's DefaultRenderersFactory only checks androidx.media3.decoder.ffmpeg.FfmpegAudioRenderer.
+        // NextLib packages it under io.github.anilbeesetti.nextlib.media3ext.ffdecoder.FfmpegAudioRenderer.
+        // Injecting it provides software decoding fallback for DTS, DTS-HD, TrueHD, AC-3, E-AC-3,
+        // OPUS, FLAC, Vorbis, and ALAC whenever the platform hardware decoders cannot handle them.
+        val candidateAudioPackages = listOf(
+            "io.github.anilbeesetti.nextlib.media3ext.ffdecoder.FfmpegAudioRenderer",
+            "androidx.media3.decoder.ffmpeg.FfmpegAudioRenderer",
+            "org.jellyfin.media3.decoder.ffmpeg.FfmpegAudioRenderer"
+        )
+
+        var ffmpegAudioRenderer: Renderer? = null
+        for (className in candidateAudioPackages) {
+            try {
+                val clazz = Class.forName(className)
+                val constructor = runCatching {
+                    clazz.getConstructor(
+                        Handler::class.java,
+                        AudioRendererEventListener::class.java,
+                        AudioSink::class.java
+                    )
+                }.getOrNull() ?: clazz.constructors.firstOrNull { it.parameterTypes.size >= 2 }
+
+                if (constructor != null) {
+                    val params = arrayOfNulls<Any>(constructor.parameterTypes.size)
+                    constructor.parameterTypes.forEachIndexed { i, pType ->
+                        params[i] = when {
+                            Handler::class.java.isAssignableFrom(pType) -> eventHandler
+                            AudioRendererEventListener::class.java.isAssignableFrom(pType) -> eventListener
+                            AudioSink::class.java.isAssignableFrom(pType) -> audioSink
+                            else -> null
+                        }
+                    }
+                    ffmpegAudioRenderer = constructor.newInstance(*params) as? Renderer
+                    if (ffmpegAudioRenderer != null) {
+                        android.util.Log.d("PlayerDiagnostics", "🎵 FFmpeg Audio Renderer found and created from: $className")
+                        break
+                    }
+                }
+            } catch (e: ClassNotFoundException) {
+                // Try next package
+            } catch (e: Exception) {
+                android.util.Log.e("PlayerDiagnostics", "❌ Failed to instantiate FFmpeg audio extension ($className)", e)
+            }
+        }
+
+        if (ffmpegAudioRenderer != null) {
+            if (extensionRendererMode == EXTENSION_RENDERER_MODE_PREFER) {
+                out.add(hardwareStartIndex, ffmpegAudioRenderer)
+                android.util.Log.i("PlayerDiagnostics", "🎵 FFmpeg Audio Renderer INJECTED (PREFER mode)")
+            } else {
+                out.add(ffmpegAudioRenderer)
+                android.util.Log.i("PlayerDiagnostics", "🎵 FFmpeg Audio Renderer INJECTED (ON mode)")
+            }
+        } else {
+            android.util.Log.w("PlayerDiagnostics", "⚠️ FFmpeg Audio Renderer NOT FOUND in any candidate package")
+        }
     }
 
     override fun buildVideoRenderers(
@@ -106,33 +166,48 @@ class AiSubtitleRenderersFactory(
 
         if (extensionRendererMode == EXTENSION_RENDERER_MODE_OFF) return
 
-        // DYNAMIC INJECTION: Jellyfin's FFmpeg Video Renderer is not part of the standard Media3
-        // factory. We load it via reflection to support software decoding of HEVC/H.264 on
+        // DYNAMIC INJECTION: NextLib / FFmpeg Video Renderer is not part of standard Media3 factory.
+        // We load it via reflection to support software decoding of HEVC/H.264/AV1/VP9 on
         // devices with buggy hardware decoders (e.g. Unisoc) while keeping the Play Store
         // build (which lacks this native lib) compilable.
         val candidatePackages = listOf(
+            "androidx.media3.decoder.ffmpeg.ExperimentalFfmpegVideoRenderer",
             "androidx.media3.decoder.ffmpeg.FfmpegVideoRenderer",
-            "org.jellyfin.media3.decoder.ffmpeg.FfmpegVideoRenderer"
+            "org.jellyfin.media3.decoder.ffmpeg.FfmpegVideoRenderer",
+            "io.github.anilbeesetti.nextlib.media3ext.ffdecoder.FfmpegVideoRenderer"
         )
 
         var ffmpegRenderer: Renderer? = null
         for (className in candidatePackages) {
             try {
                 val clazz = Class.forName(className)
-                val constructor = clazz.getConstructor(
-                    Long::class.javaPrimitiveType,
-                    Handler::class.java,
-                    VideoRendererEventListener::class.java,
-                    Int::class.javaPrimitiveType
-                )
-                ffmpegRenderer = constructor.newInstance(
-                    allowedVideoJoiningTimeMs,
-                    eventHandler,
-                    eventListener,
-                    50 // MAX_DROPPED_VIDEO_FRAME_COUNT_TO_NOTIFY
-                ) as Renderer
-                android.util.Log.d("PlayerDiagnostics", "🎬 FFmpeg Video Renderer found and created from: $className")
-                break
+                val constructor = runCatching {
+                    clazz.getConstructor(
+                        Long::class.javaPrimitiveType,
+                        Handler::class.java,
+                        VideoRendererEventListener::class.java,
+                        Int::class.javaPrimitiveType
+                    )
+                }.getOrNull() ?: clazz.constructors.firstOrNull { it.parameterTypes.size >= 3 }
+
+                if (constructor != null) {
+                    val params = arrayOfNulls<Any>(constructor.parameterTypes.size)
+                    constructor.parameterTypes.forEachIndexed { i, pType ->
+                        params[i] = when (pType) {
+                            Long::class.javaPrimitiveType, Long::class.javaObjectType -> allowedVideoJoiningTimeMs
+                            Handler::class.java -> eventHandler
+                            VideoRendererEventListener::class.java -> eventListener
+                            Int::class.javaPrimitiveType, Int::class.javaObjectType -> 50
+                            Boolean::class.javaPrimitiveType, Boolean::class.javaObjectType -> false
+                            else -> null
+                        }
+                    }
+                    ffmpegRenderer = constructor.newInstance(*params) as? Renderer
+                    if (ffmpegRenderer != null) {
+                        android.util.Log.d("PlayerDiagnostics", "🎬 FFmpeg Video Renderer found and created from: $className")
+                        break
+                    }
+                }
             } catch (e: ClassNotFoundException) {
                 // Try next package
             } catch (e: Exception) {
@@ -151,6 +226,16 @@ class AiSubtitleRenderersFactory(
         } else {
             android.util.Log.w("PlayerDiagnostics", "⚠️ FFmpeg Video Renderer NOT FOUND in any candidate package")
         }
+
+        // Apply LevelLenientVideoRenderer wrapping on all video renderers:
+        // Relaxes claimed codec levels (e.g. 5.1/5.2 on 1080p HEVC/H.264) down to 4.1
+        // so hardware decoders don't reject them with FORMAT_EXCEEDS_CAPABILITIES.
+        for (i in hardwareStartIndex until out.size) {
+            val renderer = out[i]
+            if (renderer !is LevelLenientVideoRenderer) {
+                out[i] = LevelLenientVideoRenderer(renderer)
+            }
+        }
     }
 
     override fun buildAudioSink(
@@ -160,10 +245,28 @@ class AiSubtitleRenderersFactory(
     ): AudioSink {
         val capture = AudioCaptureProcessor()
         audioCaptureProcessor = capture
+
+        val audioBuffers = DefaultAudioTrackBufferSizeProvider.Builder()
+            .setMinPcmBufferDurationUs(500_000)
+            .setMaxPcmBufferDurationUs(1_000_000)
+            .setPassthroughBufferDurationUs(500_000)
+            .setAc3BufferMultiplicationFactor(4)
+            .build()
+
+        val output = AudioTrackAudioOutputProvider.Builder(context)
+            .setAudioTrackBufferSizeProvider(audioBuffers)
+            .build()
+
+        val processors = mutableListOf<androidx.media3.common.audio.AudioProcessor>(capture)
+        if (!isDeviceMultichannelPcmSupported) {
+            processors.add(createDownmixingAudioProcessor())
+        }
+
         return DefaultAudioSink.Builder(context)
             .setEnableFloatOutput(enableFloatOutput)
-            .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
-            .setAudioProcessors(arrayOf(capture))
+            .setEnableAudioOutputPlaybackParameters(enableAudioTrackPlaybackParams)
+            .setAudioProcessors(processors.toTypedArray())
+            .setAudioOutputProvider(output)
             .build()
     }
 
@@ -197,6 +300,78 @@ class AiSubtitleRenderersFactory(
         // (while TextRenderer.render() has the cue buffer populated), trigger pre-translation.
         translatingOutput.onFirstCueOnPlaybackThread = {
             offsetRenderers.forEach { it.triggerPreTranslation() }
+        }
+    }
+
+    companion object {
+        /**
+         * Checks if the device and its current audio output (TV/HDMI/speaker) actually support
+         * initializing a 5.1 multichannel PCM AudioTrack. Many TV sticks (like Allwinner titan-p1)
+         * only support stereo PCM in their Audio HAL and will throw UnsupportedOperationException
+         * if an app requests CHANNEL_OUT_5POINT1.
+         */
+        val isDeviceMultichannelPcmSupported: Boolean by lazy {
+            try {
+                val minBuf = AudioTrack.getMinBufferSize(
+                    48000,
+                    AudioFormat.CHANNEL_OUT_5POINT1,
+                    AudioFormat.ENCODING_PCM_16BIT
+                )
+                if (minBuf <= 0) {
+                    android.util.Log.i("PlayerDiagnostics", "🔊 Device does not support 5.1 PCM (minBuf=$minBuf). Will downmix to stereo.")
+                    false
+                } else {
+                    val track = AudioTrack.Builder()
+                        .setAudioFormat(
+                            AudioFormat.Builder()
+                                .setSampleRate(48000)
+                                .setChannelMask(AudioFormat.CHANNEL_OUT_5POINT1)
+                                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                                .build()
+                        )
+                        .setBufferSizeInBytes(minBuf)
+                        .build()
+                    val ok = track.state == AudioTrack.STATE_INITIALIZED
+                    track.release()
+                    android.util.Log.i("PlayerDiagnostics", "🔊 Device 5.1 PCM output support verified: $ok")
+                    ok
+                }
+            } catch (e: Throwable) {
+                android.util.Log.i("PlayerDiagnostics", "🔊 Device 5.1 PCM output probe failed (${e.message}). Will downmix to stereo.")
+                false
+            }
+        }
+
+        private fun createDownmixingAudioProcessor(): ChannelMixingAudioProcessor {
+            val processor = ChannelMixingAudioProcessor()
+            processor.putChannelMixingMatrix(ChannelMixingMatrix(1, 1, floatArrayOf(1f)))
+            processor.putChannelMixingMatrix(ChannelMixingMatrix(2, 2, floatArrayOf(1f, 0f, 0f, 1f)))
+            processor.putChannelMixingMatrix(ChannelMixingMatrix.createForConstantPower(3, 2))
+            processor.putChannelMixingMatrix(ChannelMixingMatrix.createForConstantPower(4, 2))
+            processor.putChannelMixingMatrix(ChannelMixingMatrix.createForConstantPower(5, 2))
+            processor.putChannelMixingMatrix(ChannelMixingMatrix.createForConstantPower(6, 2))
+            val matrix70ToStereo = floatArrayOf(
+                1.0f, 0.0f,
+                0.0f, 1.0f,
+                0.7071f, 0.7071f,
+                0.5f, 0.5f,
+                0.7071f, 0.0f,
+                0.0f, 0.7071f,
+                0.5f, 0.5f
+            )
+            processor.putChannelMixingMatrix(ChannelMixingMatrix(7, 2, matrix70ToStereo))
+            val matrix71ToStereo = floatArrayOf(
+                1.0f, 0.0f,
+                0.0f, 1.0f,
+                0.7071f, 0.7071f,
+                0.5f, 0.5f,
+                0.7071f, 0.0f,
+                0.0f, 0.7071f,
+                0.7071f, 0.0f,
+                0.0f, 0.7071f
+            )
+            processor.putChannelMixingMatrix(ChannelMixingMatrix(8, 2, matrix71ToStereo))
+            return processor
         }
     }
 }

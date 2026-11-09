@@ -29,7 +29,9 @@ import com.arflix.tv.data.repository.LauncherContinueWatchingRepository
 import com.arflix.tv.data.repository.TraktRepository
 import com.arflix.tv.data.repository.WatchHistoryEntry
 import com.arflix.tv.data.repository.WatchHistoryRepository
+import com.arflix.tv.data.telegram.TelegramClient
 import com.arflix.tv.data.telegram.TelegramRepository
+import com.arflix.tv.player.telegram.ExternalPlayer
 import android.content.Intent
 import com.arflix.tv.util.AppLogger
 import com.arflix.tv.util.Constants
@@ -211,10 +213,14 @@ class PlayerViewModel @Inject constructor(
     private val tmdbApi: TmdbApi,
     private val skipIntroRepository: SkipIntroRepository,
     private val playbackTelemetryRepository: PlaybackTelemetryRepository,
-    private val telegramRepository: TelegramRepository,
+    val telegramClient: TelegramClient,
+    val telegramRepository: TelegramRepository,
     private val fenixRepository: com.arflix.tv.data.telegram.FenixRepository,
-    private val kidsContentFilter: com.arflix.tv.data.repository.KidsContentFilter
+    private val kidsContentFilter: com.arflix.tv.data.repository.KidsContentFilter,
+    val downloadManager: com.arflix.tv.data.download.DownloadManager
 ) : ViewModel() {
+
+    fun isDownloading(fileId: Int): Boolean = downloadManager.isDownloading(fileId)
 
     init {
         viewModelScope.launch {
@@ -421,6 +427,7 @@ class PlayerViewModel @Inject constructor(
     private fun defaultAudioLanguageKey() = profileManager.profileStringKey("default_audio_language")
     private fun subtitleUsageKey() = profileManager.profileStringKey("subtitle_usage_v1")
     private fun filterSubtitlesByLanguageKey() = profileManager.profileBooleanKey("filter_subtitles_by_lang")
+    private fun subtitleFilterLanguageKey() = profileManager.profileStringKey("subtitle_filter_language")
     private fun secondarySubtitleKey() = profileManager.profileStringKey("secondary_subtitle")
     private fun frameRateMatchingModeKey() = profileManager.profileStringKey("frame_rate_matching_mode")
     private fun autoPlayNextKey() = profileManager.profileBooleanKey("auto_play_next")
@@ -642,6 +649,7 @@ class PlayerViewModel @Inject constructor(
             val preferredAudioLanguage = resolvePreferredAudioLanguage()
             val frameRateMatchingMode = resolveFrameRateMatchingMode()
             val prefs = context.settingsDataStore.data.first()
+            val subFont = prefs[profileManager.profileStringKey("subtitle_font")] ?: SubtitleFontOption.DefaultPreference
             val subSize = prefs[profileManager.profileStringKey("subtitle_size")] ?: "Medium"
             val subColor = prefs[profileManager.profileStringKey("subtitle_color")] ?: "White"
             val subStyle = prefs[profileManager.profileStringKey("subtitle_style")] ?: "Bold"
@@ -694,6 +702,7 @@ class PlayerViewModel @Inject constructor(
                 preferredSubtitleLang = preferredSub,
                 secondarySubtitleLang = secondarySub,
                 frameRateMatchingMode = frameRateMatchingMode,
+                subtitleFont = subFont,
                 subtitleSize = subSize,
                 subtitleColor = subColor,
                 subtitleStyle = subStyle,
@@ -707,6 +716,37 @@ class PlayerViewModel @Inject constructor(
                 // Nothing to preload without a preferred language — don't make the gate wait.
                 subtitlePreloadComplete = normalizeLanguage(preferredSub).isBlank()
             )
+
+            // Check if this media has already been downloaded offline
+            val offlineFile = downloadManager.getDownloadedFile(mediaId, seasonNumber, episodeNumber)
+            if (offlineFile != null && offlineFile.exists()) {
+                val playUrl = "file://${offlineFile.absolutePath}"
+                Log.i(TAG, "Offline downloaded file detected for mediaId=$mediaId: $playUrl")
+                val resumeData = resolveResumeData(
+                    mediaType = mediaType,
+                    mediaId = mediaId,
+                    seasonNumber = seasonNumber,
+                    episodeNumber = episodeNumber,
+                    navigationStartPositionMs = startPositionMs
+                )
+                val offlineStream = StreamSource(
+                    source = "Download Offline",
+                    addonName = "Local",
+                    addonId = "download_offline",
+                    quality = "Offline",
+                    size = downloadManager.formatBytes(offlineFile.length()),
+                    url = playUrl
+                )
+                _uiState.value = _uiState.value.copy(
+                    isLoading = false,
+                    isLoadingStreams = false,
+                    sourceSearchActive = false,
+                    selectedStream = offlineStream,
+                    selectedStreamUrl = playUrl,
+                    savedPosition = resumeData.positionMs
+                )
+                return@launch
+            }
 
             // If stream URL provided, use it directly (except magnet links, which require resolution).
             if (providedStreamUrl != null) {
@@ -739,7 +779,8 @@ class PlayerViewModel @Inject constructor(
                     _uiState.value = _uiState.value.copy(streamLoadPhase = "Preparing stream")
                 }
                 val resolvedProvidedStream = providedStream?.let { stream ->
-                    runCatching { streamRepository.resolveStreamForPlayback(stream) }.getOrNull() ?: stream
+                    if (stream.url?.startsWith("tdfile://") == true) stream
+                    else runCatching { streamRepository.resolveStreamForPlayback(stream) }.getOrNull() ?: stream
                 }
                 val resolvedProvidedUrl = resolvedProvidedStream?.url ?: if (isMagnet) null else providedStreamUrl
                 playbackDiag(
@@ -777,6 +818,14 @@ class PlayerViewModel @Inject constructor(
                     selectedStreamUrl = resolvedProvidedUrl,
                     savedPosition = resumeData.positionMs
                 )
+
+                val currentFileId = if (resolvedProvidedUrl.startsWith("tdfile://")) {
+                    val uri = android.net.Uri.parse(resolvedProvidedUrl)
+                    uri.authority?.toIntOrNull() ?: uri.lastPathSegment?.toIntOrNull() ?: -1
+                } else -1
+                if (currentFileId > 0) {
+                    telegramRepository.onVideoLoading(currentFileId)
+                }
                 // NOTE: these background children share the load job — an uncaught exception in
                 // any of them cancels ALL siblings (that silently killed the subtitle flow).
                 // Every body is therefore failure-isolated and logged.
@@ -1402,21 +1451,23 @@ class PlayerViewModel @Inject constructor(
     }
 
     // Returns subs filtered to the preferred language(s) when the setting is enabled.
-    // Tries primary language first; if nothing matches, tries secondary; falls back to full list.
+    // Tries primary language first (with Portuguese (Brazil) -> Portuguese fallback); falls back to secondary and then full list.
     private suspend fun filterSubsByPreferredLanguage(subs: List<Subtitle>): List<Subtitle> {
         val prefs = runCatching { context.settingsDataStore.data.first() }.getOrNull() ?: return subs
         val enabled = prefs[filterSubtitlesByLanguageKey()] ?: true
         if (!enabled) return subs
-        val preferred = prefs[defaultSubtitleKey()]?.trim().orEmpty()
-        val secondary = prefs[secondarySubtitleKey()]?.trim().orEmpty()
-        val targetLanguages = listOf(preferred, secondary)
-            .filterNot { isSubtitleDisabledPreference(it) }
-            .map { normalizeLanguage(it) }
-            .filter { it.isNotBlank() }
-            .distinct()
-        if (targetLanguages.isEmpty()) return subs
 
-        fun matchesLang(sub: Subtitle, lang: String): Boolean {
+        val filterLang = prefs[subtitleFilterLanguageKey()]?.trim().takeIf { !it.isNullOrBlank() }
+            ?: prefs[defaultSubtitleKey()]?.trim()?.takeIf { !isSubtitleDisabledPreference(it) }
+            ?: "Portuguese (Brazil)"
+
+        if (isSubtitleDisabledPreference(filterLang)) return subs
+
+        val normalizedFilter = normalizeLanguage(filterLang)
+        val secondary = prefs[secondarySubtitleKey()]?.trim().orEmpty()
+        val normalizedSecondary = secondary.takeIf { !isSubtitleDisabledPreference(it) }?.let { normalizeLanguage(it) }
+
+        fun matchesLang(sub: Subtitle, target: String): Boolean {
             val tokens = buildSet {
                 add(normalizeLanguage(sub.lang))
                 add(normalizeLanguage(sub.label))
@@ -1425,19 +1476,46 @@ class PlayerViewModel @Inject constructor(
                     .filter { it.isNotBlank() }
                     .forEach { add(it) }
             }
-            if (tokens.contains(lang)) return true
+            if (tokens.contains(target)) return true
             // Substring match only for long-form names — avoids "en" matching "Indonesian"
-            if (lang.length > 2) {
-                return sub.lang.lowercase().contains(lang) || sub.label.lowercase().contains(lang)
+            if (target.length > 2) {
+                return sub.lang.lowercase().contains(target) || sub.label.lowercase().contains(target)
             }
             return false
         }
 
-        // Always keep embedded subtitles — they are needed as AI translation sources
-        // and represent tracks the device actually has, not fetched addons.
-        val combined = subs.filter { sub ->
-            sub.isEmbedded || targetLanguages.any { lang -> matchesLang(sub, lang) }
-        }.distinctBy { it.id }
+        // Always keep embedded subtitles
+        val embeddedSubs = subs.filter { it.isEmbedded }
+        val externalSubs = subs.filterNot { it.isEmbedded }
+
+        val filteredExternals = if (normalizedFilter == "pt-br") {
+            // 1. Try Portuguese (Brazil) first
+            val brMatches = externalSubs.filter { matchesLang(it, "pt-br") }
+            if (brMatches.isNotEmpty()) {
+                brMatches
+            } else {
+                // 2. Fallback to Portuguese (Portugal / generic)
+                val ptMatches = externalSubs.filter { matchesLang(it, "pt") }
+                if (ptMatches.isNotEmpty()) {
+                    ptMatches
+                } else if (normalizedSecondary != null) {
+                    externalSubs.filter { matchesLang(it, normalizedSecondary) }
+                } else {
+                    emptyList()
+                }
+            }
+        } else {
+            val primaryMatches = externalSubs.filter { matchesLang(it, normalizedFilter) }
+            if (primaryMatches.isNotEmpty()) {
+                primaryMatches
+            } else if (normalizedSecondary != null) {
+                externalSubs.filter { matchesLang(it, normalizedSecondary) }
+            } else {
+                emptyList()
+            }
+        }
+
+        val combined = (embeddedSubs + filteredExternals).distinctBy { it.id }
         return combined.ifEmpty { subs }
     }
 
@@ -1954,11 +2032,15 @@ class PlayerViewModel @Inject constructor(
         // while autoplay still uses the same quality/size ordering as the source picker.
         if (setting.equals("None", ignoreCase = true)) return "none"
 
-        if (setting.isNotBlank() && !setting.equals("Auto", ignoreCase = true) && !setting.equals("Auto (Original)", ignoreCase = true)) {
-            val fromSetting = normalizeLanguage(setting)
-            if (fromSetting in knownLanguageCodes) {
-                return fromSetting
-            }
+        val effective = if (setting.isBlank() || setting.equals("Auto", ignoreCase = true) || setting.equals("Auto (Original)", ignoreCase = true)) {
+            "Portuguese (Brazil)"
+        } else {
+            setting
+        }
+
+        val fromSetting = normalizeLanguage(effective)
+        if (fromSetting in knownLanguageCodes) {
+            return fromSetting
         }
 
         val fromOriginal = currentOriginalLanguage
@@ -1969,7 +2051,7 @@ class PlayerViewModel @Inject constructor(
     }
 
     private fun streamLanguageScore(stream: StreamSource, preferredLanguage: String): Int {
-        val preferred = normalizeLanguage(preferredLanguage).ifBlank { "en" }
+        val preferred = normalizeLanguage(preferredLanguage).ifBlank { "pt-br" }
         val combined = buildString {
             append(stream.source)
             append(' ')
@@ -1978,10 +2060,24 @@ class PlayerViewModel @Inject constructor(
                 append(' ')
                 append(it)
             }
+            stream.description?.let {
+                append(' ')
+                append(it)
+            }
         }
         val codes = extractLanguageCodes(combined).toMutableSet()
         codes.addAll(detectAudioLanguageMarkers(combined.lowercase()))
         val hasMulti = hasMultiLanguageHint(combined)
+
+        if (preferred == "pt-br") {
+            return when {
+                codes.contains("pt-br") -> 3
+                codes.contains("pt") -> 2
+                codes.isEmpty() || hasMulti -> 1
+                else -> 0
+            }
+        }
+
         return when {
             codes.contains(preferred) -> 2
             codes.isEmpty() || hasMulti -> 1
@@ -1991,9 +2087,7 @@ class PlayerViewModel @Inject constructor(
 
     /**
      * Detect audio-language markers commonly used in release names that the plain
-     * ISO-code tokenizer in [extractLanguageCodes] misses. Focused on Polish audio
-     * ("Lektor", "Dubbing PL", "PLDUB", ...) which is otherwise invisible to language
-     * scoring and would lose to a larger foreign-language rip.
+     * ISO-code tokenizer in [extractLanguageCodes] misses. Focused on Portuguese and Polish audio.
      */
     private fun detectAudioLanguageMarkers(lowerText: String): Set<String> {
         val out = mutableSetOf<String>()
@@ -2001,6 +2095,17 @@ class PlayerViewModel @Inject constructor(
             "lektor", "dubbing pl", "dub pl", "pl dub", "pldub", "pl-dub", "dubpl", "polski"
         )
         if (polishAudio.any { lowerText.contains(it) }) out.add("pl")
+
+        val ptBrAudio = listOf(
+            "dublado", "dub", "pt-br", "ptbr", "pt_br", "brazilian", "dubbing br", "audio pt-br", "áudio pt-br", "dual audio", "dual áudio", "nacional"
+        )
+        if (ptBrAudio.any { lowerText.contains(it) }) out.add("pt-br")
+
+        val ptAudio = listOf(
+            "português", "portugues", "legendado pt", "pt-pt", "ptpt"
+        )
+        if (ptAudio.any { lowerText.contains(it) }) out.add("pt")
+
         return out
     }
 
@@ -2404,7 +2509,8 @@ class PlayerViewModel @Inject constructor(
                 isSetupError = false
             )
             val resolvedResult = runCatching {
-                streamRepository.resolveStreamForPlayback(stream)
+                if (stream.url?.startsWith("tdfile://") == true) stream
+                else streamRepository.resolveStreamForPlayback(stream)
             }
             resolvedResult.onFailure { error ->
                 AppLogger.recordException(
@@ -2491,10 +2597,37 @@ class PlayerViewModel @Inject constructor(
             aiSourceSubtitle = null
             translationManager.isEnabled = false
 
-            // Direct URL - use immediately (ExoPlayer handles redirects)
+            // Check if this stream or media is available as an offline download
+            val streamFileId = runCatching {
+                val u = android.net.Uri.parse(url)
+                if (u.scheme == "tdfile") u.authority?.toIntOrNull() ?: u.lastPathSegment?.toIntOrNull()
+                else if (u.path?.contains("/file/") == true) u.lastPathSegment?.toIntOrNull()
+                else null
+            }.getOrNull()
+
+            val downloadedFile = (streamFileId?.let { downloadManager.getDownloadedFileByFileId(it) })
+                ?: downloadManager.getDownloadedFile(currentMediaId, currentSeason, currentEpisode)
+
+            val effectiveUrl = if (downloadedFile != null && downloadedFile.exists()) {
+                val localUrl = "file://${downloadedFile.absolutePath}"
+                Log.i(TAG, "Playing offline downloaded copy directly: $localUrl")
+                localUrl
+            } else {
+                url
+            }
+
+            val currentFileId = if (effectiveUrl.startsWith("tdfile://")) {
+                val uri = android.net.Uri.parse(effectiveUrl)
+                uri.authority?.toIntOrNull() ?: uri.lastPathSegment?.toIntOrNull() ?: -1
+            } else -1
+            if (currentFileId > 0) {
+                telegramRepository.onVideoLoading(currentFileId)
+            }
+
+            // Direct URL - use immediately (ExoPlayer handles redirects and file:// uris)
             _uiState.value = _uiState.value.copy(
                 selectedStream = resolvedStream,
-                selectedStreamUrl = url,
+                selectedStreamUrl = effectiveUrl,
                 savedPosition = requestedResumePosition ?: _uiState.value.savedPosition,
                 streamSelectionNonce = _uiState.value.streamSelectionNonce + 1,
                 subtitles = _uiState.value.subtitles.filterNot { it.isEmbedded },
@@ -4702,6 +4835,23 @@ class PlayerViewModel @Inject constructor(
 
     fun launchExternalPlayer(context: Context, stream: StreamSource) {
         viewModelScope.launch {
+            val rawUrl = stream.url ?: return@launch
+            if (rawUrl.startsWith("tdfile://")) {
+                val uri = android.net.Uri.parse(rawUrl)
+                val fileId = uri.authority?.toIntOrNull() ?: uri.lastPathSegment?.toIntOrNull()
+                if (fileId != null && fileId > 0) {
+                    val mimeType = uri.getQueryParameter("type") ?: "video/*"
+                    ExternalPlayer.handOver(
+                        context = context,
+                        client = telegramClient,
+                        fileId = fileId,
+                        title = _uiState.value.title,
+                        mimeType = mimeType
+                    )
+                    return@launch
+                }
+            }
+
             ensureTelegramProxyReady(stream)
             val resolvedResult = runCatching {
                 streamRepository.resolveStreamForPlayback(stream)
@@ -4745,9 +4895,18 @@ class PlayerViewModel @Inject constructor(
     override fun onCleared() {
         super.onCleared()
         telegramRepository.stopProxyService()
+        viewModelScope.launch(Dispatchers.IO) {
+            telegramRepository.onPlaybackStopped()
+        }
     }
 
     private suspend fun ensureTelegramProxyReady(stream: StreamSource?) {
+        val streamUrl = stream?.url
+        if (streamUrl != null && streamUrl.startsWith("tdfile://")) {
+            // Direct native TdDataSource — no HTTP proxy required
+            return
+        }
+
         val isTelegram = stream?.addonId == "telegram_native" || 
                         stream?.addonId == "fenix_bot_native" ||
                         stream?.url?.contains("127.0.0.1") == true

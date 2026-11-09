@@ -62,8 +62,11 @@ val AppTopBarHorizontalPadding = 28.dp
 
 // Navigation items that appear CENTERED in the top bar (Search, Home, Watchlist, TV).
 // Settings is NOT in this list — it's rendered as a standalone gear icon on the right.
+// Downloads is intentionally hidden from TV navigation to preserve device storage.
 private val NAV_ITEMS = SidebarItem.entries.filter { 
-    it != SidebarItem.SETTINGS && (it != SidebarItem.TV || com.arflix.tv.util.FeatureVisibility.SHOW_LIVE_TV)
+    it != SidebarItem.SETTINGS && 
+    it != SidebarItem.DOWNLOADS && 
+    (it != SidebarItem.TV || com.arflix.tv.util.FeatureVisibility.SHOW_LIVE_TV)
 }
 
 fun topBarMaxIndex(hasProfile: Boolean): Int {

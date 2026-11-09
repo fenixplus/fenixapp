@@ -6,6 +6,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -92,6 +94,19 @@ fun TelegramSettingsScreen(
     val cacheSizeBytes by viewModel.cacheSizeBytes.collectAsState()
     var showDisconnectConfirm by remember { mutableStateOf(false) }
     val backFocusRequester = remember { FocusRequester() }
+
+    val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+    androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                viewModel.refreshCacheSize()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
 
     Box(
         modifier = Modifier
@@ -541,10 +556,12 @@ private fun ConnectedContent(
     onClearCache: () -> Unit
 ) {
     Column(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState()),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Spacer(modifier = Modifier.height(40.dp))
+        Spacer(modifier = Modifier.height(24.dp))
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -963,11 +980,16 @@ private fun DisconnectConfirmDialog(onConfirm: () -> Unit, onDismiss: () -> Unit
 }
 
 private fun formatCacheSize(bytes: Long): String = when {
-    bytes <= 0 -> "Empty"
+    bytes <= 0 -> "0 B"
     bytes >= 1_000_000_000 -> "%.1f GB".format(bytes / 1_000_000_000.0)
     bytes >= 1_000_000 -> "%.1f MB".format(bytes / 1_000_000.0)
     bytes >= 1_000 -> "%.0f KB".format(bytes / 1_000.0)
     else -> "$bytes B"
+}
+
+private fun formatLimitMb(mb: Long): String = when {
+    mb >= 1024 -> "%.1f GB".format(mb / 1024.0)
+    else -> "$mb MB"
 }
 
 @Composable

@@ -1,6 +1,7 @@
 package com.arflix.tv.ui.components
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -43,6 +44,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Storage
+import androidx.compose.material.icons.outlined.FileDownload
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Movie
 import androidx.compose.material3.Icon
@@ -116,26 +118,42 @@ private val AccentGold = Color.White
 private suspend fun TvLazyListState.scrollToKeepFocusVisible(focusedIndex: Int, itemCount: Int) {
     if (itemCount == 0) return
     val target = focusedIndex.coerceIn(0, itemCount - 1)
-    val visibleItems = layoutInfo.visibleItemsInfo
-    if (visibleItems.isEmpty()) {
-        scrollToItem(target)
+
+    // Ao voltar para o topo, garante que o primeiro item fique 100% visível no início absoluto (sem ficar cortado)
+    if (target == 0) {
+        if (firstVisibleItemIndex != 0 || firstVisibleItemScrollOffset != 0) {
+            animateScrollToItem(0, 0)
+        }
         return
     }
-    val firstVisible = visibleItems.first().index
-    val lastVisible = visibleItems.last().index
-    val visibleCount = (lastVisible - firstVisible + 1).coerceAtLeast(1)
-    when {
-        target <= firstVisible -> {
-            val dest = (target - 1).coerceAtLeast(0)
-            if (dest != firstVisible) {
-                scrollToItem(dest)
-            }
+
+    val visibleItems = layoutInfo.visibleItemsInfo
+    if (visibleItems.isEmpty()) {
+        animateScrollToItem(target, 0)
+        return
+    }
+
+    val itemInfo = visibleItems.firstOrNull { it.index == target }
+    val vpStart = layoutInfo.viewportStartOffset
+    val vpEnd = layoutInfo.viewportEndOffset
+
+    if (itemInfo == null) {
+        val firstVisible = visibleItems.first().index
+        if (target < firstVisible) {
+            animateScrollToItem(target, 0)
+        } else {
+            val visibleCount = (visibleItems.last().index - firstVisible + 1).coerceAtLeast(1)
+            val dest = (target - visibleCount + 1).coerceAtLeast(0)
+            animateScrollToItem(dest, 0)
         }
-        target >= lastVisible -> {
-            val dest = (target - visibleCount + 2).coerceIn(0, target)
-            if (dest != firstVisible) {
-                scrollToItem(dest)
-            }
+    } else {
+        // Item está na lista, mas pode estar parcialmente escondido no topo ou na base
+        if (itemInfo.offset < vpStart) {
+            animateScrollToItem(target, 0)
+        } else if (itemInfo.offset + itemInfo.size > vpEnd) {
+            val overflow = (itemInfo.offset + itemInfo.size) - vpEnd
+            val newOffset = firstVisibleItemScrollOffset + overflow + 20
+            animateScrollToItem(firstVisibleItemIndex, newOffset)
         }
     }
 }
@@ -162,6 +180,7 @@ fun StreamSelector(
     onFocusedStream: (StreamSource) -> Unit = {},
     onExternalPlayer: ((StreamSource) -> Unit)? = null,
     onSelect: (StreamSource) -> Unit = {},
+    onDownload: ((StreamSource) -> Unit)? = null,
     onClose: () -> Unit = {}
 ) {
     var useExternalPlayer by remember { mutableStateOf(false) }
@@ -366,71 +385,30 @@ fun StreamSelector(
                                 true
                             }
                             Key.DirectionUp -> {
-                                if (focusZone == "addons") {
-                                    if (focusedTabIndex > 0) {
-                                        focusedTabIndex--
-                                        selectedTabIndex = focusedTabIndex  // Immediately filter on focus
-                                        focusedIndex = 0  // Reset stream selection
-                                    }
-                                } else if (focusZone == "streams") {
+                                if (focusZone == "streams") {
                                     if (focusedIndex > 0) {
                                         focusedIndex--
                                     } else {
                                         focusZone = "external_toggle"
                                     }
-                                } else if (focusZone == "external_toggle") {
-                                    if (tabLabels.size > 1) {
-                                        focusZone = "addons"
-                                        focusedTabIndex = selectedTabIndex
-                                    }
                                 }
                                 true
                             }
                             Key.DirectionDown -> {
-                                if (focusZone == "addons") {
-                                    if (focusedTabIndex < tabLabels.size - 1) {
-                                        focusedTabIndex++
-                                        selectedTabIndex = focusedTabIndex  // Immediately filter on focus
-                                        focusedIndex = 0  // Reset stream selection
-                                    }
-                                } else if (focusZone == "streams") {
-                                    if (focusedIndex < flatStreams.size - 1) focusedIndex++
-                                } else if (focusZone == "external_toggle") {
+                                if (focusZone == "external_toggle") {
                                     focusZone = "streams"
                                     focusedIndex = 0
-                                }
-                                true
-                            }
-                            Key.DirectionLeft -> {
-                                when {
-                                    focusZone == "addons" -> {
-                                        focusZone = "streams"
-                                        focusedIndex = focusedIndex.coerceAtMost((flatStreams.size - 1).coerceAtLeast(0))
-                                    }
-                                    focusZone == "external_toggle" -> {
-                                        focusZone = "streams"
-                                        focusedIndex = 0
-                                    }
-                                }
-                                true
-                            }
-                            Key.DirectionRight -> {
-                                when {
-                                    (focusZone == "streams" || focusZone == "external_toggle") && tabLabels.size > 1 -> {
-                                        focusZone = "addons"
-                                        focusedTabIndex = selectedTabIndex
+                                } else if (focusZone == "streams") {
+                                    if (focusedIndex < flatStreams.size - 1) {
+                                        focusedIndex++
                                     }
                                 }
                                 true
                             }
                             Key.Enter, Key.DirectionCenter -> {
-                                if (focusZone == "addons") {
-                                    // Tab already selected on focus, just move to streams
-                                    focusZone = "streams"
-                                    focusedIndex = 0
-                                } else if (focusZone == "external_toggle") {
+                                if (focusZone == "external_toggle") {
                                     useExternalPlayer = !useExternalPlayer
-                                } else {
+                                } else if (focusZone == "streams") {
                                     flatStreams.getOrNull(focusedIndex)?.let { stream ->
                                         if (useExternalPlayer) {
                                             onExternalPlayer?.invoke(stream)
@@ -546,48 +524,6 @@ fun StreamSelector(
                         }
                     }
 
-                    // Horizontal scrollable tab row for addon filters
-                    if (tabLabels.size > 1) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .horizontalScroll(rememberScrollState())
-                                .padding(vertical = 8.dp),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            tabLabels.forEachIndexed { index, label ->
-                                val isSelected = index == selectedTabIndex
-                                Box(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(16.dp))
-                                        .background(
-                                            if (isSelected) Pink.copy(alpha = 0.3f)
-                                            else Color.White.copy(alpha = 0.08f)
-                                        )
-                                        .then(
-                                            if (isSelected) Modifier.border(1.dp, Pink.copy(alpha = 0.5f), RoundedCornerShape(16.dp))
-                                            else Modifier.border(1.dp, Color.White.copy(alpha = 0.1f), RoundedCornerShape(16.dp))
-                                        )
-                                        .clickable {
-                                            selectedTabIndex = index
-                                            focusedIndex = 0
-                                        }
-                                        .padding(horizontal = 14.dp, vertical = 6.dp)
-                                ) {
-                                    Text(
-                                        text = label,
-                                        style = ArflixTypography.caption.copy(
-                                            fontSize = 12.sp,
-                                            fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
-                                        ),
-                                        color = if (isSelected) Pink else TextSecondary,
-                                        maxLines = 1
-                                    )
-                                }
-                            }
-                        }
-                    }
-
                     // Stream list or loading/empty states
                     if (streams.isEmpty()) {
                         val stillSearching = isLoading || (completedAddons < totalAddons && totalAddons > 0) || pluginScrapersLoading
@@ -687,6 +623,9 @@ fun StreamSelector(
                                         } else {
                                             onSelect(presentation.stream)
                                         }
+                                    },
+                                    onDownloadClick = onDownload?.let { dl ->
+                                        { dl(presentation.stream) }
                                     }
                                 )
                             }
@@ -742,16 +681,10 @@ private fun OledSourceSelectorTv(
             .clip(RoundedCornerShape(24.dp))
             .background(Color.White.copy(alpha = 0.032f), RoundedCornerShape(24.dp))
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxHeight()
-                .padding(start = 20.dp, top = 18.dp, end = 18.dp, bottom = 18.dp),
-            horizontalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
         Column(
             modifier = Modifier
-                .weight(1f)
-                .fillMaxHeight()
+                .fillMaxSize()
+                .padding(horizontal = 24.dp, vertical = 20.dp)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -876,17 +809,18 @@ private fun OledSourceSelectorTv(
                 else -> Box(modifier = Modifier.weight(1f)) {
                     TvLazyColumn(
                         state = listState,
-                        contentPadding = PaddingValues(bottom = 10.dp),
-                        verticalArrangement = Arrangement.spacedBy(5.dp),
+                        contentPadding = PaddingValues(top = 8.dp, bottom = 14.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
                         modifier = Modifier
                             .fillMaxSize()
                             .arvioDpadFocusGroup()
                     ) {
                         flatPresentations.forEachIndexed { index, presentation ->
                             item(key = presentation.hashCode()) {
+                                val isRowFocused = streamsFocused && index == focusedIndex
                                 OledSourceRow(
                                     presentation = presentation,
-                                    isFocused = streamsFocused && index == focusedIndex,
+                                    isCardFocused = isRowFocused,
                                     isSelected = isSelectedSource(presentation.stream, selectedStream),
                                     onClick = { onSelect(presentation.stream) }
                                 )
@@ -943,21 +877,6 @@ private fun OledSourceSelectorTv(
                     }
                 }
             }
-        }
-
-        SourceAddonRail(
-            tabLabels = tabLabels,
-            selectedTabIndex = selectedTabIndex,
-            focusedTabIndex = focusedTabIndex,
-            isFocused = addonRailFocused,
-            listState = addonListState,
-            totalSources = streams.size,
-            count4K = count4K,
-            count1080 = count1080,
-            completedAddons = completedAddons,
-            totalAddons = totalAddons,
-            onSelect = onAddonSelected
-        )
         }
     }
 }
@@ -1147,19 +1066,37 @@ private fun isSelectedSource(candidate: StreamSource, selected: StreamSource?): 
     selected ?: return false
     if (candidate == selected) return true
 
-    val sameAddon = candidate.addonId.isNotBlank() && candidate.addonId == selected.addonId
-    val sameSource = candidate.source.isNotBlank() && candidate.source == selected.source
-    val sameFile = candidate.behaviorHints?.filename?.takeIf { it.isNotBlank() }?.let { filename ->
-        filename == selected.behaviorHints?.filename
-    } ?: false
-    val sameBingeGroup = candidate.behaviorHints?.bingeGroup?.takeIf { it.isNotBlank() }?.let { group ->
-        group == selected.behaviorHints?.bingeGroup
-    } ?: false
-    val sameUrl = candidate.url?.takeIf { it.isNotBlank() }?.let { url ->
-        url == selected.url
-    } ?: false
+    // 1. Comparação direta por URL de streaming (HLS, MP4, Debrid link, tdfile://)
+    val candidateUrl = candidate.url?.trim()
+    val selectedUrl = selected.url?.trim()
+    if (!candidateUrl.isNullOrBlank() && !selectedUrl.isNullOrBlank()) {
+        return candidateUrl == selectedUrl
+    }
 
-    return sameUrl || (sameAddon && (sameSource || sameFile || sameBingeGroup))
+    // 2. Comparação por Torrent infoHash e índice do arquivo
+    val candidateHash = candidate.infoHash?.trim()
+    val selectedHash = selected.infoHash?.trim()
+    if (!candidateHash.isNullOrBlank() && !selectedHash.isNullOrBlank()) {
+        return candidateHash.equals(selectedHash, ignoreCase = true) && candidate.fileIdx == selected.fileIdx
+    }
+
+    // 3. Comparação precisa dentro do mesmo addon por nome de arquivo específico
+    if (candidate.addonId.isNotBlank() && candidate.addonId == selected.addonId) {
+        val candidateFilename = candidate.behaviorHints?.filename?.trim()
+        val selectedFilename = selected.behaviorHints?.filename?.trim()
+        if (!candidateFilename.isNullOrBlank() && !selectedFilename.isNullOrBlank()) {
+            return candidateFilename == selectedFilename
+        }
+
+        // 4. Fallback por título do addon + qualidade + tamanho (evita marcar todas as fontes do addon)
+        val candidateTitle = candidate.addonTitle ?: candidate.description
+        val selectedTitle = selected.addonTitle ?: selected.description
+        if (!candidateTitle.isNullOrBlank() && candidateTitle == selectedTitle) {
+            return candidate.quality == selected.quality && candidate.size == selected.size
+        }
+    }
+
+    return false
 }
 
 private fun isDebridLikeSource(stream: StreamSource, blob: String? = null): Boolean {
@@ -1302,23 +1239,24 @@ private fun presentSource(stream: StreamSource): SourcePresentation {
     }
 
     val resolutionLabel = when {
-        searchBlob.contains("2160p", true) || searchBlob.contains("4K", true) -> "4K"
-        searchBlob.contains("1080p", true) -> "1080p"
-        searchBlob.contains("720p", true) -> "720p"
+        searchBlob.contains("2160p", true) || searchBlob.contains("4K", true) || stream.quality.equals("4K", true) -> "4K"
+        searchBlob.contains("1080p", true) || searchBlob.contains("FHD", true) || stream.quality.equals("FHD", true) -> "FHD"
+        searchBlob.contains("720p", true) || searchBlob.contains("HD", true) || stream.quality.equals("HD", true) -> "HD"
+        searchBlob.contains("480p", true) || searchBlob.contains("SD", true) || stream.quality.equals("SD", true) -> "SD"
         StreamRegexes.CAM.containsMatchIn(searchBlob) -> "CAM"
-        else -> stream.quality.split(" ").firstOrNull()?.take(8) ?: "SD"
+        else -> "SD"
     }
     val resolutionScore = when (resolutionLabel) {
         "4K" -> 4
-        "1080p" -> 3
-        "720p" -> 2
+        "FHD", "1080p" -> 3
+        "HD", "720p" -> 2
         "CAM" -> 0
         else -> 1
     }
     val qualityColor = when (resolutionLabel) {
         "4K" -> AccentGold
-        "1080p" -> AccentBlue
-        "720p" -> Color(0xFF06B6D4)
+        "FHD", "1080p" -> AccentBlue
+        "HD", "720p" -> Color(0xFF06B6D4)
         "CAM" -> Color(0xFFEF4444)
         else -> TextSecondary
     }
@@ -1980,7 +1918,7 @@ private fun SourceEmptyState(
 @Composable
 private fun OledSourceRow(
     presentation: SourcePresentation,
-    isFocused: Boolean,
+    isCardFocused: Boolean,
     isSelected: Boolean,
     onClick: () -> Unit
 ) {
@@ -1995,14 +1933,14 @@ private fun OledSourceRow(
             .clip(RoundedCornerShape(15.dp))
             .background(
                 when {
-                    isFocused -> Color.White.copy(alpha = 0.11f)
+                    isCardFocused -> Color.White.copy(alpha = 0.11f)
                     isSelected -> Color.White.copy(alpha = 0.07f)
                     else -> Color.White.copy(alpha = 0.028f)
                 },
                 RoundedCornerShape(15.dp)
             )
             .then(
-                if (isFocused) {
+                if (isCardFocused) {
                     Modifier.border(1.5.dp, Color.White.copy(alpha = 0.96f), RoundedCornerShape(15.dp))
                 } else {
                     Modifier
@@ -2017,24 +1955,22 @@ private fun OledSourceRow(
                 .fillMaxHeight(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Badges take a bounded ~42% and WRAP into 2-3 rows instead of a single row that
-            // eats the whole card on high-chip sources; the filename then always keeps ≥55%.
+            // Badges take a bounded ~40%
             OledBadgeFlow(
                 presentation = presentation,
                 maxBadges = 8,
-                modifier = Modifier.weight(0.42f)
+                modifier = Modifier.weight(0.40f)
             )
             Spacer(modifier = Modifier.width(12.dp))
-            Column(modifier = Modifier.weight(0.58f)) {
+            Column(modifier = Modifier.weight(0.60f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    // Full filename, wrapped — an ellipsized release name hides exactly the
-                    // parts that differentiate sources (edition, audio, group).
+                    // Full filename, wrapped
                     Text(
                         text = presentation.rawTitle,
                         style = ArflixTypography.body.copy(
                             fontSize = 12.sp,
                             lineHeight = 15.sp,
-                            fontWeight = if (isFocused) FontWeight.Bold else FontWeight.SemiBold
+                            fontWeight = if (isCardFocused) FontWeight.Bold else FontWeight.SemiBold
                         ),
                         color = TextPrimary,
                         modifier = Modifier.weight(1f)
@@ -2264,7 +2200,8 @@ private fun OledTextBadge(
 private fun MobileStreamCard(
     presentation: SourcePresentation,
     isSelected: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onDownloadClick: (() -> Unit)? = null
 ) {
     Row(
         modifier = Modifier
@@ -2275,7 +2212,7 @@ private fun MobileStreamCard(
             )
             .clickable { onClick() }
             .padding(horizontal = 13.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.Top
+        verticalAlignment = Alignment.CenterVertically
     ) {
         Column(modifier = Modifier.weight(1f)) {
             Row(
@@ -2340,6 +2277,25 @@ private fun MobileStreamCard(
                     contentDescription = stringResource(R.string.selected),
                     tint = Color.White,
                     modifier = Modifier.size(14.dp)
+                )
+            }
+        }
+
+        if (onDownloadClick != null) {
+            Spacer(modifier = Modifier.width(10.dp))
+            Box(
+                modifier = Modifier
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .background(Color.White.copy(alpha = 0.08f))
+                    .clickable { onDownloadClick() },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.FileDownload,
+                    contentDescription = stringResource(R.string.download),
+                    tint = TextSecondary,
+                    modifier = Modifier.size(22.dp)
                 )
             }
         }
@@ -2579,16 +2535,17 @@ private fun CompactQualityBadge(stream: StreamSource) {
 
     val quality = stream.quality
     val is4K = quality.contains("4K", ignoreCase = true) || quality.contains("2160p")
-    val is1080 = quality.contains("1080p")
-    val is720 = quality.contains("720p")
+    val is1080 = quality.contains("1080p") || quality.contains("FHD", ignoreCase = true)
+    val is720 = quality.contains("720p") || quality.contains("HD", ignoreCase = true)
     val isHDR = StreamRegexes.HDR.containsMatchIn(searchBlob)
     val isDV = StreamRegexes.DV.containsMatchIn(searchBlob)
     val isIMAX = StreamRegexes.IMAX.containsMatchIn(searchBlob)
 
     val displayText = when {
         is4K -> "4K"
-        is1080 -> "1080p"
-        is720 -> "720p"
+        is1080 -> "FHD"
+        is720 -> "HD"
+        quality.contains("480p", ignoreCase = true) || quality.contains("SD", ignoreCase = true) -> "SD"
         else -> quality.split(" ").firstOrNull()?.take(6) ?: "SD"
     }
 

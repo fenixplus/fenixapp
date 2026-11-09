@@ -308,6 +308,7 @@ fun SettingsScreen(
     onNavigateToSearch: () -> Unit = {},
     onNavigateToTv: () -> Unit = {},
     onNavigateToWatchlist: () -> Unit = {},
+    onNavigateToDownloads: () -> Unit = {},
     onNavigateToTelegramSettings: () -> Unit = {},
     onSwitchProfile: () -> Unit = {},
     onBack: () -> Unit = {}
@@ -417,6 +418,8 @@ fun SettingsScreen(
     var catalogInputUrl by remember { mutableStateOf("") }
     var showSubtitlePicker by remember { mutableStateOf(false) }
     var subtitlePickerIndex by remember { mutableIntStateOf(0) }
+    var showSubtitleFilterPicker by remember { mutableStateOf(false) }
+    var subtitleFilterPickerIndex by remember { mutableIntStateOf(0) }
     var showSecondarySubtitlePicker by remember { mutableStateOf(false) }
     var secondarySubtitlePickerIndex by remember { mutableIntStateOf(0) }
     var showAudioLanguagePicker by remember { mutableStateOf(false) }
@@ -496,6 +499,14 @@ fun SettingsScreen(
         subtitlePickerIndex = options.indexOfFirst { it.equals(uiState.defaultSubtitle, ignoreCase = true) }
             .coerceAtLeast(0)
         showSubtitlePicker = true
+    }
+    val openSubtitleFilterPicker = {
+        viewModel.refreshSubtitleOptions()
+        val options = listOf("Off") + uiState.subtitleOptions.filter { it != "Off" && it != "Forced" }
+        val currentSelection = if (uiState.filterSubtitlesByLanguage) uiState.subtitleFilterLanguage else "Off"
+        subtitleFilterPickerIndex = options.indexOfFirst { it.equals(currentSelection, ignoreCase = true) }
+            .coerceAtLeast(0)
+        showSubtitleFilterPicker = true
     }
     val openSecondarySubtitlePicker = {
         viewModel.refreshSubtitleOptions()
@@ -714,6 +725,7 @@ fun SettingsScreen(
         showCatalogInput ||
         showCatalogRename ||
         showSubtitlePicker ||
+        showSubtitleFilterPicker ||
         showSecondarySubtitlePicker ||
         showAudioLanguagePicker ||
         showDnsProviderPicker ||
@@ -925,6 +937,7 @@ fun SettingsScreen(
                                             SidebarItem.HOME -> onNavigateToHome()
                                             SidebarItem.TV -> onNavigateToTv()
                                             SidebarItem.WATCHLIST -> onNavigateToWatchlist()
+                                            SidebarItem.DOWNLOADS -> onNavigateToDownloads()
                                             SidebarItem.SETTINGS -> { /* Already here */ }
                                             null -> Unit
                                         }
@@ -944,7 +957,7 @@ fun SettingsScreen(
                                                 6 -> viewModel.cycleSubtitleOffset()
                                                 7 -> viewModel.cycleSubtitleStyle()
                                                 8 -> viewModel.toggleSubtitleStylized()
-                                                9 -> viewModel.setFilterSubtitlesByLanguage(!uiState.filterSubtitlesByLanguage)
+                                                9 -> openSubtitleFilterPicker()
                                                 10 -> viewModel.setAutoPlayNext(!uiState.autoPlayNext)
                                                 11 -> viewModel.setAutoPlaySingleSource(!uiState.autoPlaySingleSource)
                                                 12 -> viewModel.cycleAutoPlayMinQuality()
@@ -1212,6 +1225,7 @@ fun SettingsScreen(
                 onOpenProfilesDialog = { showMobileProfilesDialog = true },
                 openContentLanguagePicker = openContentLanguagePicker,
                 openSubtitlePicker = openSubtitlePicker,
+                openSubtitleFilterPicker = openSubtitleFilterPicker,
                 openSecondarySubtitlePicker = openSecondarySubtitlePicker,
                 openAudioLanguagePicker = openAudioLanguagePicker,
                 openDnsProviderPicker = openDnsProviderPicker,
@@ -1442,6 +1456,8 @@ fun SettingsScreen(
                             onSubtitleStyleClick = { viewModel.cycleSubtitleStyle() },
                             onSubtitleStylizedToggle = { viewModel.toggleSubtitleStylized() },
                             filterSubtitlesByLanguage = uiState.filterSubtitlesByLanguage,
+                            subtitleFilterLanguage = uiState.subtitleFilterLanguage,
+                            onFilterSubtitlesLanguageClick = openSubtitleFilterPicker,
                             onFilterSubtitlesByLanguageToggle = { viewModel.setFilterSubtitlesByLanguage(it) },
                             qualityFilterValue = uiState.qualityFilterPresetLabel,
                             onQualityFiltersClick = { showQualityFiltersModal = true },
@@ -2045,6 +2061,28 @@ fun SettingsScreen(
                     showSubtitlePicker = false
                 },
                 onDismiss = { showSubtitlePicker = false }
+            )
+        }
+
+        if (showSubtitleFilterPicker) {
+            val filterOptions = listOf("Off") + uiState.subtitleOptions.filter { it != "Off" && it != "Forced" }
+            val currentFilterSelection = if (uiState.filterSubtitlesByLanguage) uiState.subtitleFilterLanguage else "Off"
+            SubtitlePickerModal(
+                title = stringResource(R.string.filter_subtitles),
+                options = filterOptions,
+                selected = currentFilterSelection,
+                focusedIndex = subtitleFilterPickerIndex,
+                onFocusChange = { subtitleFilterPickerIndex = it },
+                onSelect = { selectedLang ->
+                    if (selectedLang.equals("Off", ignoreCase = true)) {
+                        viewModel.setFilterSubtitlesByLanguage(false)
+                    } else {
+                        viewModel.setSubtitleFilterLanguage(selectedLang)
+                        viewModel.setFilterSubtitlesByLanguage(true)
+                    }
+                    showSubtitleFilterPicker = false
+                },
+                onDismiss = { showSubtitleFilterPicker = false }
             )
         }
 
@@ -3511,6 +3549,7 @@ private fun MobileSettingsLayout(
     onOpenProfilesDialog: () -> Unit = {},
     openContentLanguagePicker: () -> Unit,
     openSubtitlePicker: () -> Unit,
+    openSubtitleFilterPicker: () -> Unit = {},
     openSecondarySubtitlePicker: () -> Unit = {},
     openAudioLanguagePicker: () -> Unit,
     openDnsProviderPicker: () -> Unit,
@@ -3574,6 +3613,7 @@ private fun MobileSettingsLayout(
                 onNavigate = onNavigate,
                 openContentLanguagePicker = openContentLanguagePicker,
                 openSubtitlePicker = openSubtitlePicker,
+                openSubtitleFilterPicker = openSubtitleFilterPicker,
                 openSecondarySubtitlePicker = openSecondarySubtitlePicker,
                 openAudioLanguagePicker = openAudioLanguagePicker,
                 onSwitchProfile = onSwitchProfile,
@@ -3610,6 +3650,7 @@ private fun MobileSettingsLayout(
                 uiState = uiState,
                 viewModel = viewModel,
                 stremioAddons = stremioAddons,
+                openSubtitleFilterPicker = openSubtitleFilterPicker,
                 openDnsProviderPicker = openDnsProviderPicker,
                 openUiModeWarningDialog = openUiModeWarningDialog,
                 openQualityFiltersModal = openQualityFiltersModal,
@@ -3655,6 +3696,7 @@ private fun MobileSettingsMainPage(
     onNavigate: (String) -> Unit,
     openContentLanguagePicker: () -> Unit,
     openSubtitlePicker: () -> Unit,
+    openSubtitleFilterPicker: () -> Unit = {},
     openSecondarySubtitlePicker: () -> Unit = {},
     openAudioLanguagePicker: () -> Unit,
     onSwitchProfile: () -> Unit,
@@ -3733,9 +3775,10 @@ private fun MobileSettingsMainPage(
                 MobileSettingsRow(
                     icon = Icons.Default.Subtitles,
                     title = stringResource(R.string.filter_subtitles),
-                    value = if (uiState.filterSubtitlesByLanguage) "On" else "Off",
+                    subtitle = stringResource(R.string.filter_subtitles_desc),
+                    value = if (uiState.filterSubtitlesByLanguage) uiState.subtitleFilterLanguage else stringResource(R.string.off),
                     isFocused = false,
-                    onClick = { viewModel.setFilterSubtitlesByLanguage(!uiState.filterSubtitlesByLanguage) }
+                    onClick = openSubtitleFilterPicker
                 )
                 MobileSettingsRow(
                     icon = Icons.Default.VolumeUp,
@@ -3862,6 +3905,7 @@ private fun MobileSettingsSubPage(
     uiState: SettingsUiState,
     viewModel: SettingsViewModel,
     stremioAddons: List<com.arflix.tv.data.model.Addon>,
+    openSubtitleFilterPicker: () -> Unit = {},
     openDnsProviderPicker: () -> Unit,
     openUiModeWarningDialog: () -> Unit,
     openQualityFiltersModal: () -> Unit,
@@ -4023,10 +4067,10 @@ private fun MobileSettingsSubPage(
                         icon = Icons.Default.Subtitles,
                         title = stringResource(R.string.filter_subtitles),
                         subtitle = stringResource(R.string.filter_subtitles_desc),
-                        value = if (uiState.filterSubtitlesByLanguage) "On" else "Off",
+                        value = if (uiState.filterSubtitlesByLanguage) uiState.subtitleFilterLanguage else stringResource(R.string.off),
                         isFocused = false,
                         showDivider = false,
-                        onClick = { viewModel.setFilterSubtitlesByLanguage(!uiState.filterSubtitlesByLanguage) }
+                        onClick = openSubtitleFilterPicker
                     )
                 }
                 MobileSettingsCategory(title = stringResource(R.string.ai_subtitles_section)) {
@@ -5111,6 +5155,8 @@ private fun TvGeneralSettingsRows(
     subtitleStylized: Boolean = true,
     onSubtitleStylizedToggle: () -> Unit = {},
     filterSubtitlesByLanguage: Boolean = true,
+    subtitleFilterLanguage: String = "Portuguese (Brazil)",
+    onFilterSubtitlesLanguageClick: () -> Unit = {},
     onFilterSubtitlesByLanguageToggle: (Boolean) -> Unit = {},
     onTrailerAutoPlayToggle: (Boolean) -> Unit = {},
     onTrailerSoundEnabledToggle: (Boolean) -> Unit = {},
@@ -5185,7 +5231,7 @@ private fun TvGeneralSettingsRows(
                 6 -> SettingsRow(Icons.Default.Subtitles, stringResource(R.string.subtitle_offset), stringResource(R.string.subtitle_offset_desc), subtitleOffset, focusedIndex == localIndex, onSubtitleOffsetClick, Modifier.settingsFocusSlot(localIndex))
                 7 -> SettingsRow(Icons.Default.Subtitles, stringResource(R.string.subtitle_style), stringResource(R.string.subtitle_style_desc), subtitleStyle, focusedIndex == localIndex, onSubtitleStyleClick, Modifier.settingsFocusSlot(localIndex))
                 8 -> SettingsToggleRow(stringResource(R.string.subtitle_stylized), stringResource(R.string.subtitle_stylized_desc), subtitleStylized, focusedIndex == localIndex, { onSubtitleStylizedToggle() }, Modifier.settingsFocusSlot(localIndex))
-                9 -> SettingsToggleRow(stringResource(R.string.filter_subtitles), stringResource(R.string.filter_subtitles_desc), filterSubtitlesByLanguage, focusedIndex == localIndex, onFilterSubtitlesByLanguageToggle, Modifier.settingsFocusSlot(localIndex))
+                9 -> SettingsRow(Icons.Default.Subtitles, stringResource(R.string.filter_subtitles), stringResource(R.string.filter_subtitles_desc), if (filterSubtitlesByLanguage) subtitleFilterLanguage else stringResource(R.string.off), focusedIndex == localIndex, onFilterSubtitlesLanguageClick, Modifier.settingsFocusSlot(localIndex))
                 10 -> SettingsToggleRow(stringResource(R.string.auto_play_next_title), stringResource(R.string.auto_play_desc), autoPlayNext, focusedIndex == localIndex, onAutoPlayToggle, Modifier.settingsFocusSlot(localIndex))
                 11 -> SettingsToggleRow(stringResource(R.string.autoplay), stringResource(R.string.autoplay_desc), autoPlaySingleSource, focusedIndex == localIndex, onAutoPlaySingleSourceToggle, Modifier.settingsFocusSlot(localIndex))
                 12 -> SettingsRow(Icons.Default.HighQuality, stringResource(R.string.auto_play_min_quality), stringResource(R.string.auto_play_quality_desc), autoPlayMinQuality, focusedIndex == localIndex, onAutoPlayMinQualityClick, Modifier.settingsFocusSlot(localIndex))
@@ -5322,6 +5368,8 @@ private fun GeneralSettings(
     subtitleStylized: Boolean = true,
     onSubtitleStylizedToggle: () -> Unit = {},
     filterSubtitlesByLanguage: Boolean = true,
+    subtitleFilterLanguage: String = "Portuguese (Brazil)",
+    onFilterSubtitlesLanguageClick: () -> Unit = {},
     onFilterSubtitlesByLanguageToggle: (Boolean) -> Unit = {},
     onTrailerAutoPlayToggle: (Boolean) -> Unit = {},
     onTrailerSoundEnabledToggle: (Boolean) -> Unit = {},
@@ -5441,12 +5489,13 @@ private fun GeneralSettings(
             modifier = Modifier.settingsFocusSlot(8)
         )
         Spacer(modifier = Modifier.height(10.dp))
-        SettingsToggleRow(
+        SettingsRow(
+            icon = Icons.Default.Subtitles,
             title = stringResource(R.string.filter_subtitles),
             subtitle = stringResource(R.string.filter_subtitles_desc),
-            isEnabled = filterSubtitlesByLanguage,
+            value = if (filterSubtitlesByLanguage) subtitleFilterLanguage else stringResource(R.string.off),
             isFocused = focusedIndex == 9,
-            onToggle = onFilterSubtitlesByLanguageToggle,
+            onClick = onFilterSubtitlesLanguageClick,
             modifier = Modifier.settingsFocusSlot(9)
         )
 

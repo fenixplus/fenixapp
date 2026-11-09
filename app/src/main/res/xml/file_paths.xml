@@ -3,4 +3,13 @@
     <cache-path
         name="updates"
         path="updates/" />
+    <files-path
+        name="tdlib_files"
+        path="tdlib_files/" />
+    <files-path
+        name="all_files"
+        path="." />
+    <cache-path
+        name="all_cache"
+        path="." />
 </paths>

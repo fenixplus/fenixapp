@@ -9,12 +9,21 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
+import com.arflix.tv.util.DeviceType
+import com.arflix.tv.util.detectDeviceType
+import com.arflix.tv.util.telegramDataStore
 import org.drinkless.tdlib.Client
 import org.drinkless.tdlib.TdApi
 import java.io.File
@@ -56,6 +65,13 @@ class TelegramClient @Inject constructor(
     private val _authState = MutableStateFlow<TelegramAuthState>(TelegramAuthState.Idle)
     val authState: StateFlow<TelegramAuthState> = _authState.asStateFlow()
 
+    private val _fileUpdates = MutableSharedFlow<TdApi.UpdateFile>(
+        replay = 0,
+        extraBufferCapacity = 128,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
+    val fileUpdates: SharedFlow<TdApi.UpdateFile> = _fileUpdates.asSharedFlow()
+
     private var client: Client? = null
 
     // Completed when TDLib reports AuthorizationStateClosed for the current client.
@@ -82,6 +98,8 @@ class TelegramClient @Inject constructor(
                 return@launch
             }
             stepLog("library loaded OK")
+            // Mute verbose TDLib internal packet logging (default is 4, which floods Android logcat)
+            try { Client.execute<TdApi.Ok>(TdApi.SetLogVerbosityLevel(1)) } catch (_: Throwable) {}
             _authState.value = TelegramAuthState.Initializing
             try {
                 if (!BuildConfig.DEBUG) {
@@ -144,14 +162,27 @@ class TelegramClient @Inject constructor(
         }, null)
 
         // Native TDLib cache limits (Protects low storage devices like Fire Stick)
-        // 1GB max cache size
-        client?.send(TdApi.SetOption("storage_max_files_size", TdApi.OptionValueInteger(1024L * 1024L * 1024L)), null)
+        val limitMb: Long = try {
+            runBlocking {
+                context.telegramDataStore.data.first()[TelegramRepository.KEY_CACHE_LIMIT_MB]
+            } ?: if (detectDeviceType(context) == DeviceType.TV) 1024L else 2048L
+        } catch (_: Throwable) {
+            if (detectDeviceType(context) == DeviceType.TV) 1024L else 2048L
+        }
+
+        client?.send(TdApi.SetOption("storage_max_files_size", TdApi.OptionValueInteger(limitMb * 1024L * 1024L)), null)
         // Max time from last access: 1 day
         client?.send(TdApi.SetOption("storage_max_time_from_last_access", TdApi.OptionValueInteger(86400L)), null)
+
+        // Disable prefer_ipv6 to prevent PMTUD black hole and carrier throttling issues on dual-stack networks
+        client?.send(TdApi.SetOption("prefer_ipv6", TdApi.OptionValueBoolean(false)), null)
+        // Notify network type to avoid stale connections
+        client?.send(TdApi.SetNetworkType(TdApi.NetworkTypeWiFi()), null)
     }
 
     private fun handleUpdate(obj: TdApi.Object) {
         when (obj) {
+            is TdApi.UpdateFile -> _fileUpdates.tryEmit(obj)
             is TdApi.UpdateAuthorizationState -> handleAuthState(obj.authorizationState)
             is TdApi.Error -> {
                 val state = _authState.value
@@ -269,6 +300,96 @@ class TelegramClient @Inject constructor(
         client = null
         _authState.value = TelegramAuthState.Idle
     }
+
+    suspend fun getFile(fileId: Int): TdApi.File? =
+        try {
+            sendRequest(TdApi.GetFile(fileId)) as? TdApi.File
+        } catch (_: Throwable) {
+            null
+        }
+
+    suspend fun getRemoteFile(remoteFileId: String, fileType: TdApi.FileType? = null): TdApi.File? =
+        try {
+            sendRequest(TdApi.GetRemoteFile(remoteFileId, fileType)) as? TdApi.File
+        } catch (_: Throwable) {
+            null
+        }
+
+    suspend fun downloadFile(
+        fileId: Int,
+        priority: Int = 32,
+        offset: Long = 0L,
+        limit: Long = 0L,
+        synchronous: Boolean = false
+    ): TdApi.File? =
+        try {
+            sendRequest(TdApi.DownloadFile().also {
+                it.fileId = fileId
+                it.priority = priority
+                it.offset = offset
+                it.limit = limit
+                it.synchronous = synchronous
+            }) as? TdApi.File
+        } catch (_: Throwable) {
+            null
+        }
+
+    suspend fun cancelDownloadFile(fileId: Int, onlyIfPending: Boolean = false) {
+        try {
+            sendRequest(TdApi.CancelDownloadFile().also {
+                it.fileId = fileId
+                it.onlyIfPending = onlyIfPending
+            })
+        } catch (_: Throwable) {}
+    }
+
+    suspend fun deleteFile(fileId: Int) {
+        try {
+            sendRequest(TdApi.DeleteFile().also { it.fileId = fileId })
+        } catch (_: Throwable) {}
+    }
+
+    suspend fun getFileDownloadedPrefixSize(fileId: Int, offset: Long): Long {
+        return try {
+            val result = sendRequest(TdApi.GetFileDownloadedPrefixSize().also {
+                it.fileId = fileId
+                it.offset = offset
+            }) as? TdApi.FileDownloadedPrefixSize
+            result?.size ?: 0L
+        } catch (_: Throwable) {
+            0L
+        }
+    }
+
+    fun setStorageLimit(limitBytes: Long) {
+        client?.send(TdApi.SetOption("storage_max_files_size", TdApi.OptionValueInteger(limitBytes)), null)
+    }
+
+    suspend fun optimizeStorage(sizeLimitBytes: Long = -1L, immunityDelay: Int = 60): TdApi.StorageStatistics? =
+        try {
+            sendRequest(
+                TdApi.OptimizeStorage(
+                    sizeLimitBytes,
+                    -1,
+                    -1,
+                    immunityDelay,
+                    null,
+                    null,
+                    null,
+                    false,
+                    0
+                )
+            ) as? TdApi.StorageStatistics
+        } catch (_: Throwable) {
+            null
+        }
+
+    suspend fun getStorageStatisticsFast(): TdApi.StorageStatisticsFast? =
+        try {
+            sendRequest(TdApi.GetStorageStatisticsFast()) as? TdApi.StorageStatisticsFast
+        } catch (_: Throwable) {
+            null
+        }
 
     /**
      * Signs this device out of Telegram. TDLib's LogOut revokes the session on

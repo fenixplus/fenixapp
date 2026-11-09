@@ -22,6 +22,7 @@ import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.LiveTv
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.outlined.FileDownload
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -61,6 +62,7 @@ val bottomBarItems = buildList {
     add(BottomBarItem(R.string.home, Icons.Default.Home, "home"))
     add(BottomBarItem(R.string.search, Icons.Default.Search, "search"))
     add(BottomBarItem(R.string.watchlist, Icons.Default.Bookmark, "watchlist"))
+    add(BottomBarItem(R.string.downloads, Icons.Outlined.FileDownload, "downloads"))
     if (com.arflix.tv.util.FeatureVisibility.SHOW_LIVE_TV) {
         add(BottomBarItem(R.string.topbar_tv, Icons.Default.LiveTv, "tv"))
     }

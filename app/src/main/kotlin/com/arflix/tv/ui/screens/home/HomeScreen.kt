@@ -627,9 +627,9 @@ private suspend fun androidx.compose.foundation.lazy.LazyListState.animateHomeSc
         animate(
             initialValue = 0f,
             targetValue = deltaPx,
-            animationSpec = spring(
-                dampingRatio = 0.85f,
-                stiffness = 200f
+            animationSpec = tween(
+                durationMillis = durationMillis,
+                easing = FastOutSlowInEasing
             )
         ) { value, _ ->
             val step = value - previousValue
@@ -764,6 +764,7 @@ fun HomeScreen(
     onNavigateToSearch: () -> Unit = {},
     onNavigateToWatchlist: () -> Unit = {},
     onNavigateToTv: (channelId: String?, streamUrl: String?) -> Unit = { _, _ -> },
+    onNavigateToDownloads: () -> Unit = {},
     onNavigateToPlayer: (MediaType, Int, String, String?, String?) -> Unit = { _, _, _, _, _ -> },
     onNavigateToSettings: () -> Unit = {},
     onNavigateToTelegram: () -> Unit = {},
@@ -1495,6 +1496,7 @@ fun HomeScreen(
             onNavigateToSearch = onNavigateToSearch,
             onNavigateToWatchlist = onNavigateToWatchlist,
             onNavigateToTv = onNavigateToTv,
+            onNavigateToDownloads = onNavigateToDownloads,
             getIptvStreamUrl = { itemId -> viewModel.getIptvStreamUrl(itemId) },
             isSportsHomeItem = { item -> viewModel.isSportsHomeItem(item) },
             onSportsHomeItemClick = openSportsHomeItem,
@@ -2567,6 +2569,7 @@ private fun HomeInputLayer(
     onNavigateToSearch: () -> Unit,
     onNavigateToWatchlist: () -> Unit,
     onNavigateToTv: (channelId: String?, streamUrl: String?) -> Unit,
+    onNavigateToDownloads: () -> Unit = {},
     getIptvStreamUrl: (itemId: Int) -> String?,
     isSportsHomeItem: (MediaItem) -> Boolean = { false },
     onSportsHomeItemClick: (MediaItem) -> Unit = {},
@@ -2779,6 +2782,7 @@ private fun HomeInputLayer(
                                     SidebarItem.HOME -> Unit
                                     SidebarItem.WATCHLIST -> onNavigateToWatchlist()
                                     SidebarItem.TV -> onNavigateToTv(null, null)
+                                    SidebarItem.DOWNLOADS -> onNavigateToDownloads()
                                     SidebarItem.SETTINGS -> onNavigateToSettings()
                                     null -> Unit
                                 }
@@ -3960,7 +3964,9 @@ internal fun ContentRow(
             offsetDelta > 1
         ) {
             if (smoothScrolling) {
-                val deltaPx = ((scrollTargetIndex - currentFirstIndex) * itemSpanPx) + (extraOffset - currentFirstOffset)
+                val deltaPx = rowState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == scrollTargetIndex }
+                    ?.offset?.toFloat()
+                    ?: (((scrollTargetIndex - currentFirstIndex) * itemSpanPx) + (extraOffset - currentFirstOffset))
                 rowState.animateHomeScrollDelta(
                     deltaPx = deltaPx,
                     durationMillis = when {
@@ -4071,17 +4077,22 @@ internal fun ContentRow(
                         // after the 500ms focus-settle delay, so the Animatable is always new.
                         val expandAnim = remember { Animatable(itemWidth.value) }
                         LaunchedEffect(Unit) {
-                            expandAnim.animateTo(380f, spring())
+                            expandAnim.animateTo(360f, spring())
                         }
                         val expandedWidth = expandAnim.value.dp
                         Box(modifier = Modifier.width(expandedWidth)) {
                             FeaturedMediaCard(
                                 item = item,
                                 width = expandedWidth,
-                                height = 146.dp,
+                                height = if (effectivePosterMode) {
+                                    val progress = ((expandedWidth.value - itemWidth.value) / (360f - itemWidth.value)).coerceIn(0f, 1f)
+                                    (157.5f + 45f * progress).dp
+                                } else (expandedWidth * (9f / 16f)).coerceAtMost(202.5.dp),
+                                artworkWidth = 360.dp,
                                 trailerKey = featuredTrailerKey,
                                 trailerDelayMs = 0L,
                                 trailerVolume = featuredTrailerVolume,
+                                autoplayNotBeforeMs = null,
                                 onClick = onCardClick,
                             )
                             TopRankRibbon(
@@ -4131,7 +4142,7 @@ internal fun ContentRow(
                     val cardLogoUrl = if (isCollectionRow) null else cardLogoUrls["${item.mediaType}_${item.id}"]
                     val cardExpanded = hasFeaturedCard && itemIsFocused && featuredExpanded
                     val animatedCardWidth by animateDpAsState(
-                        targetValue = if (cardExpanded) 380.dp else itemWidth,
+                        targetValue = if (cardExpanded) 360.dp else itemWidth,
                         animationSpec = if (cardExpanded) spring() else snap(),
                         label = "featuredCardWidth"
                     )
@@ -4139,10 +4150,15 @@ internal fun ContentRow(
                         FeaturedMediaCard(
                             item = item,
                             width = animatedCardWidth,
-                            height = 146.dp,
+                            height = if (effectivePosterMode) {
+                                val progress = ((animatedCardWidth.value - itemWidth.value) / (360f - itemWidth.value)).coerceIn(0f, 1f)
+                                (157.5f + 45f * progress).dp
+                            } else (animatedCardWidth * (9f / 16f)).coerceAtMost(202.5.dp),
+                            artworkWidth = 360.dp,
                             trailerKey = featuredTrailerKey,
                             trailerDelayMs = 0L,
                             trailerVolume = featuredTrailerVolume,
+                            autoplayNotBeforeMs = null,
                             onClick = onCardClick,
                         )
                     } else {

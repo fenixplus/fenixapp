@@ -5,6 +5,7 @@
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- Permissions -->
@@ -39,10 +40,6 @@
         <profileable
             android:shell="true"
             tools:targetApi="q" />
-
-        <meta-data
-            android:name="io.sentry.auto-init"
-            android:value="false" />
 
         <meta-data
             android:name="com.google.android.gms.cast.framework.OPTIONS_PROVIDER_CLASS_NAME"
@@ -150,6 +147,23 @@
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
+
+        <service
+            android:name=".data.download.DownloadService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <receiver
+            android:name=".data.download.DownloadActionReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.fenix.plus.ACTION_DOWNLOAD_PAUSE" />
+                <action android:name="com.fenix.plus.ACTION_DOWNLOAD_RESUME" />
+                <action android:name="com.fenix.plus.ACTION_DOWNLOAD_CANCEL" />
+            </intent-filter>
+        </receiver>
 
     </application>
 
