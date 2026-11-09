@@ -118,7 +118,9 @@ data class HomeUiState(
     val categoryHasMoreMap: Map<String, Boolean> = emptyMap(),
     val categoryLoadingMap: Map<String, Boolean> = emptyMap(),
     val smoothScrolling: Boolean = false,
-    val netflixHomeStyle: Boolean = true
+    val netflixHomeStyle: Boolean = true,
+    val isOffline: Boolean = false,
+    val completedDownloadsCount: Int = 0
 )
 
 @androidx.compose.runtime.Immutable
@@ -160,6 +162,8 @@ class HomeViewModel @Inject constructor(
     private val fenixRepository: FenixRepository,
     private val telegramRepository: TelegramRepository,
     private val kidsContentFilter: com.arflix.tv.data.repository.KidsContentFilter,
+    private val networkMonitor: com.arflix.tv.network.NetworkMonitor,
+    private val downloadManager: com.arflix.tv.data.download.DownloadManager,
     @ApplicationContext private val context: Context
 ) : ViewModel() {
     val kidsFilterState: StateFlow<com.arflix.tv.data.repository.KidsContentFilter.State> = kidsContentFilter.state
@@ -1423,6 +1427,26 @@ class HomeViewModel @Inject constructor(
 
     init {
         viewModelScope.launch {
+            val initialCount = downloadManager.downloads.value.count { it.status == com.arflix.tv.data.download.DownloadStatus.COMPLETED }
+            _uiState.value = _uiState.value.copy(
+                isOffline = !networkMonitor.isConnected,
+                completedDownloadsCount = initialCount
+            )
+            networkMonitor.isConnectedFlow.collect { connected ->
+                if (connected && _uiState.value.isOffline) {
+                    _uiState.value = _uiState.value.copy(isOffline = false)
+                    loadHomeData()
+                } else if (!connected) {
+                    val count = downloadManager.downloads.value.count { it.status == com.arflix.tv.data.download.DownloadStatus.COMPLETED }
+                    _uiState.value = _uiState.value.copy(
+                        isOffline = true,
+                        completedDownloadsCount = count
+                    )
+                }
+            }
+        }
+
+        viewModelScope.launch {
             streamRepository.installedAddons.collectLatest { addons ->
                 _sportsHomeRows.value = sportsRepository.buildHomeRows(addons, selectedSportsCategoryId)
             }
@@ -2107,7 +2131,61 @@ class HomeViewModel @Inject constructor(
             if (requestId != loadHomeRequestId) return@loadHome
             applyContentLanguageFromPrefs()
 
-            _uiState.value = _uiState.value.copy(isLoading = true, error = null)
+            val isOnline = networkMonitor.isConnected
+            if (!isOnline) {
+                val completedDownloads = downloadManager.downloads.value.count { it.status == com.arflix.tv.data.download.DownloadStatus.COMPLETED }
+                _uiState.value = _uiState.value.copy(
+                    isLoading = false,
+                    isInitialLoad = false,
+                    isOffline = true,
+                    completedDownloadsCount = completedDownloads,
+                    categories = emptyList(),
+                    heroItem = null,
+                    error = null
+                )
+                return@loadHome
+            }
+
+            _uiState.value = _uiState.value.copy(isLoading = true, isOffline = false, error = null)
+
+            val hasRealBaseCategories = _uiState.value.categories.any {
+                it.id != "continue_watching" && !it.id.startsWith("collection_row_") && it.items.any { item -> !item.isPlaceholder }
+            }
+            if (!hasRealBaseCategories) {
+                val existingCw = _uiState.value.categories.firstOrNull { it.id == "continue_watching" && it.items.isNotEmpty() }
+                    ?: lastContinueWatchingItems.takeIf { it.isNotEmpty() }?.let {
+                        Category(
+                            id = "continue_watching",
+                            title = context.getString(R.string.continue_watching),
+                            items = it
+                        )
+                    }
+                val initialCatalogs = runCatching { catalogRepository.getCatalogs() }.getOrNull()?.ifEmpty {
+                    mediaRepository.getDefaultCatalogConfigs()
+                } ?: mediaRepository.getDefaultCatalogConfigs()
+
+                val skeletonCategories = buildProfileSkeletonCategories(
+                    savedCatalogs = initialCatalogs,
+                    cachedContinueWatching = emptyList()
+                )
+                val initialSkeleton = if (existingCw != null) {
+                    listOf(existingCw) + skeletonCategories.filterNot { it.id == "continue_watching" }
+                } else {
+                    skeletonCategories
+                }
+                if (requestId != loadHomeRequestId) return@loadHome
+                if (initialSkeleton.isNotEmpty()) {
+                    val skeletonHero = chooseInitialHero(initialSkeleton)
+                    _uiState.value = _uiState.value.copy(
+                        isLoading = true,
+                        isInitialLoad = false,
+                        categories = initialSkeleton,
+                        heroItem = _uiState.value.heroItem ?: skeletonHero,
+                        heroLogoUrl = _uiState.value.heroLogoUrl,
+                        error = null
+                    )
+                }
+            }
 
             try {
                 // 1. Garantir sincronização do catálogo Fenix antes de processar as linhas
@@ -2719,27 +2797,25 @@ class HomeViewModel @Inject constructor(
         cachedContinueWatching: List<ContinueWatchingItem>
     ): List<Category> {
         val placeholderItems = createPlaceholderItems()
+        val validIds = setOf("trending_movies", "trending_tv", "trending_anime")
 
         val rows = mutableListOf<Category>()
         if (cachedContinueWatching.isNotEmpty()) {
             rows.add(
                 Category(
                     id = "continue_watching",
-                    title = "Continue Watching",
+                    title = context.getString(R.string.continue_watching),
                     items = cachedContinueWatching.map { it.toMediaItem() }
-                )
-            )
-        } else {
-            rows.add(
-                Category(
-                    id = "continue_watching",
-                    title = "Continue Watching",
-                    items = placeholderItems
                 )
             )
         }
 
-        savedCatalogs.forEach { cfg ->
+        // Only include rows that actually exist on the Home screen
+        val filteredCatalogs = savedCatalogs.filter { cfg ->
+            cfg.id in validIds || isCollectionRailConfig(cfg)
+        }
+
+        filteredCatalogs.forEach { cfg ->
             if (isCollectionTileConfig(cfg)) return@forEach
             val rowItems = if (isCollectionRailConfig(cfg)) {
                 val group = cfg.collectionGroup

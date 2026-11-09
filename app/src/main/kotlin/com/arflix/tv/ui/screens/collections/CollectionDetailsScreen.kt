@@ -160,11 +160,10 @@ class CollectionDetailsViewModel @Inject constructor(
     private var providerJob: kotlinx.coroutines.Job? = null
 
     private companion object {
-        const val FIRST_PAGE = 30
-        const val PAGE_STEP = 30
-        const val BACKGROUND_PREFETCH_DELAY_MS = 200L
+        const val FIRST_PAGE = 8
+        const val PAGE_STEP = 12
+        const val BACKGROUND_PREFETCH_DELAY_MS = 350L
         const val TMDB_COLLECTION_PREFIX = "tmdb_collection:"
-        const val MIN_FILTERED_ITEMS_TARGET = 24
     }
 
     fun load(catalogId: String) {
@@ -260,8 +259,28 @@ class CollectionDetailsViewModel @Inject constructor(
     }
 
     private suspend fun loadInitialTab(catalog: CatalogConfig, tab: CollectionTab) {
-        val page = runCatching { loadCollectionPage(catalog, tab, offset = 0, limit = FIRST_PAGE) }.getOrNull()
-        val rawCount = page?.items?.size ?: 0
+        val requestScope = viewModelScope
+        val page = runCatching {
+            loadCollectionPage(
+                catalog = catalog,
+                tab = tab,
+                offset = 0,
+                limit = FIRST_PAGE,
+                onItemsAvailable = { items ->
+                    requestScope.launch {
+                        val state = _uiState.value
+                        val loading = if (tab == CollectionTab.MOVIES) state.isLoadingMovies else state.isLoadingSeries
+                        if (!loading) return@launch
+                        val partial = filterFenixItems(items.filter { it.mediaType == tab.mediaType() })
+                        _uiState.value = when (tab) {
+                            CollectionTab.MOVIES -> state.copy(movieItems = partial)
+                            CollectionTab.SERIES -> state.copy(seriesItems = partial)
+                        }
+                    }
+                }
+            )
+        }.getOrNull()
+
         val pageItems = when (tab) {
             CollectionTab.MOVIES -> filterFenixItems(page?.items.orEmpty().filter { it.mediaType == MediaType.MOVIE })
             CollectionTab.SERIES -> filterFenixItems(page?.items.orEmpty().filter { it.mediaType == MediaType.TV })
@@ -273,7 +292,7 @@ class CollectionDetailsViewModel @Inject constructor(
                 movieItems = pageItems,
                 isLoadingMovies = false,
                 hasMoreMovies = page?.hasMore == true,
-                loadedMovieOffset = rawCount,
+                loadedMovieOffset = page?.nextOffset ?: pageItems.size,
                 error = _uiState.value.error ?: if (page == null) COLLECTION_LOAD_FAILED_ERROR else null
             )
             CollectionTab.SERIES -> _uiState.value.copy(
@@ -281,11 +300,11 @@ class CollectionDetailsViewModel @Inject constructor(
                 seriesItems = pageItems,
                 isLoadingSeries = false,
                 hasMoreSeries = page?.hasMore == true,
-                loadedSeriesOffset = rawCount,
+                loadedSeriesOffset = page?.nextOffset ?: pageItems.size,
                 error = _uiState.value.error ?: if (page == null) COLLECTION_LOAD_FAILED_ERROR else null
             )
         }
-        preloadLogos(pageItems.take(4))
+        preloadLogos(pageItems.take(2))
         val hasMore = when (tab) {
             CollectionTab.MOVIES -> _uiState.value.hasMoreMovies
             CollectionTab.SERIES -> _uiState.value.hasMoreSeries
@@ -312,67 +331,44 @@ class CollectionDetailsViewModel @Inject constructor(
         }
         viewModelScope.launch {
             val pageCatalog = catalogForTab(catalog, tab)
-            var currentRawOffset = when (tab) {
-                CollectionTab.MOVIES -> _uiState.value.loadedMovieOffset
-                CollectionTab.SERIES -> _uiState.value.loadedSeriesOffset
+            val nextOffset = when (tab) {
+                CollectionTab.MOVIES -> state.loadedMovieOffset
+                CollectionTab.SERIES -> state.loadedSeriesOffset
             }
-            val accumulatedFiltered = mutableListOf<MediaItem>()
-            var hasMoreFromApi = true
-            var attempts = 0
-            val maxAttempts = 3
+            val next = runCatching {
+                loadCollectionPage(
+                    catalog = pageCatalog,
+                    tab = tab,
+                    offset = nextOffset,
+                    limit = PAGE_STEP
+                )
+            }.getOrNull()
 
-            while (attempts < maxAttempts && hasMoreFromApi && accumulatedFiltered.size < 12) {
-                attempts++
-                val next = runCatching {
-                    loadCollectionPage(pageCatalog, tab, offset = currentRawOffset, limit = PAGE_STEP)
-                }.getOrNull()
-
-                val rawItems = next?.items.orEmpty()
-                if (rawItems.isEmpty()) {
-                    hasMoreFromApi = false
-                    break
-                }
-                currentRawOffset += rawItems.size
-                hasMoreFromApi = next?.hasMore == true
-
-                val freshItems = when (tab) {
-                    CollectionTab.MOVIES -> filterFenixItems(rawItems.filter { it.mediaType == MediaType.MOVIE })
-                    CollectionTab.SERIES -> filterFenixItems(rawItems.filter { it.mediaType == MediaType.TV })
-                }
-                val currentExistingIds = when (tab) {
-                    CollectionTab.MOVIES -> (_uiState.value.movieItems + accumulatedFiltered).mapTo(HashSet()) { it.id to it.mediaType }
-                    CollectionTab.SERIES -> (_uiState.value.seriesItems + accumulatedFiltered).mapTo(HashSet()) { it.id to it.mediaType }
-                }
-                val uniqueNew = freshItems.filter { (it.id to it.mediaType) !in currentExistingIds }
-                accumulatedFiltered.addAll(uniqueNew)
-
-                if (!hasMoreFromApi) break
+            val freshItems = when (tab) {
+                CollectionTab.MOVIES -> filterFenixItems(next?.items.orEmpty().filter { it.mediaType == MediaType.MOVIE })
+                CollectionTab.SERIES -> filterFenixItems(next?.items.orEmpty().filter { it.mediaType == MediaType.TV })
             }
-
+            val current = _uiState.value
+            val existingIds = when (tab) {
+                CollectionTab.MOVIES -> current.movieItems.mapTo(HashSet()) { it.id to it.mediaType }
+                CollectionTab.SERIES -> current.seriesItems.mapTo(HashSet()) { it.id to it.mediaType }
+            }
+            val uniqueNew = freshItems.filter { (it.id to it.mediaType) !in existingIds }
             _uiState.value = when (tab) {
                 CollectionTab.MOVIES -> _uiState.value.copy(
-                    movieItems = _uiState.value.movieItems + accumulatedFiltered,
+                    movieItems = current.movieItems + uniqueNew,
                     isLoadingMoreMovies = false,
-                    hasMoreMovies = hasMoreFromApi,
-                    loadedMovieOffset = currentRawOffset
+                    hasMoreMovies = next?.hasMore == true,
+                    loadedMovieOffset = next?.nextOffset ?: (state.loadedMovieOffset + freshItems.size)
                 )
                 CollectionTab.SERIES -> _uiState.value.copy(
-                    seriesItems = _uiState.value.seriesItems + accumulatedFiltered,
+                    seriesItems = current.seriesItems + uniqueNew,
                     isLoadingMoreSeries = false,
-                    hasMoreSeries = hasMoreFromApi,
-                    loadedSeriesOffset = currentRawOffset
+                    hasMoreSeries = next?.hasMore == true,
+                    loadedSeriesOffset = next?.nextOffset ?: (state.loadedSeriesOffset + freshItems.size)
                 )
             }
-            preloadLogos(accumulatedFiltered)
-
-            val totalFilteredCount = when (tab) {
-                CollectionTab.MOVIES -> _uiState.value.movieItems.size
-                CollectionTab.SERIES -> _uiState.value.seriesItems.size
-            }
-            if (hasMoreFromApi && totalFilteredCount < MIN_FILTERED_ITEMS_TARGET) {
-                delay(100L)
-                loadMoreIfNeeded(tab)
-            }
+            preloadLogos(uniqueNew)
         }
     }
 
@@ -464,18 +460,27 @@ class CollectionDetailsViewModel @Inject constructor(
         catalog: CatalogConfig,
         tab: CollectionTab,
         offset: Int,
-        limit: Int
+        limit: Int,
+        onItemsAvailable: ((List<MediaItem>) -> Unit)? = null
     ): MediaRepository.CategoryPageResult {
         return if (SportsAddonCapabilities.isSportsCollectionCatalogId(catalog.id)) {
             sportsRepository.loadSportsCollectionPage(catalog.id, offset = offset, limit = limit)
         } else {
             mediaRepository.loadCollectionCatalogPage(
-                catalogForTab(catalog, tab),
+                catalog = catalogForTab(catalog, tab),
                 offset = offset,
-                limit = limit
+                limit = limit,
+                mediaType = tab.mediaType(),
+                refFilter = { type, tmdbId ->
+                    if (type == MediaType.MOVIE) fenixRepository.isMovieAvailable(tmdbId)
+                    else fenixRepository.isSeriesAvailable(tmdbId)
+                },
+                onItemsAvailable = onItemsAvailable
             )
         }
     }
+
+    private fun CollectionTab.mediaType() = if (this == CollectionTab.MOVIES) MediaType.MOVIE else MediaType.TV
 
     private fun decorateSportsCatalogWithArtwork(
         catalog: CatalogConfig,

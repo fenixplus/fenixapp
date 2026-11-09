@@ -71,6 +71,7 @@ class FenixRepository @Inject constructor(
     private val telegramClient: TelegramClient,
     private val telegramRepository: TelegramRepository,
     private val telegramProxy: TelegramStreamingProxy,
+    private val networkMonitor: com.arflix.tv.network.NetworkMonitor,
     @ApplicationContext private val context: Context
 ) {
     companion object {
@@ -203,6 +204,12 @@ class FenixRepository @Inject constructor(
 
     suspend fun syncCatalog(force: Boolean = false) {
         syncMutex.withLock {
+            if (!networkMonitor.isConnected) {
+                Log.d(TAG, "Sync skipped: Device is offline")
+                loadLocalCatalog(File(context.cacheDir, "fenix_catalog.json"))
+                return@withLock
+            }
+
             val now = System.currentTimeMillis()
             if (!force && now - lastSyncCheckTime < SYNC_COOLDOWN_MS && _catalog.value.movies.isNotEmpty()) {
                 Log.d(TAG, "Sync skipped: Cooldown ativo (intervalo de ${SYNC_COOLDOWN_MS / 1000}s)")
@@ -729,7 +736,6 @@ class FenixRepository @Inject constructor(
                                     resDesc = res.description
                                     detectedQuality = parseQuality(resDesc ?: "")
                                         .ifBlank { parseQuality(fileName) }
-                                        .ifBlank { parseQuality(resTitle ?: "") }
                                 }
                                 is TdApi.InlineQueryResultVideo -> {
                                     file = res.video.video
@@ -738,14 +744,13 @@ class FenixRepository @Inject constructor(
                                     resDesc = res.description
                                     val w = res.video.width
                                     val h = res.video.height
+                                    val maxDim = maxOf(w, h)
                                     detectedQuality = when {
-                                        h >= 2160 || w >= 3840 -> "4K"
-                                        h >= 1080 || w >= 1900 -> "FHD"
-                                        h >= 720 || w >= 1200 -> "HD"
-                                        h >= 480 || w >= 640 -> "SD"
-                                        else -> parseQuality(resDesc ?: "")
-                                            .ifBlank { parseQuality(fileName) }
-                                            .ifBlank { parseQuality(resTitle ?: "") }
+                                        maxDim >= 3500 || w >= 3500 || h >= 1600 -> "4K"
+                                        maxDim >= 1700 || w >= 1700 || (h >= 900 && w >= 1200) -> "FHD"
+                                        maxDim >= 1100 || w >= 1100 || (h >= 650 && w >= 800) -> "HD"
+                                        maxDim >= 600 || w >= 600 || h >= 400 -> "SD"
+                                        else -> parseQuality(resDesc ?: "").ifBlank { parseQuality(fileName) }
                                     }
                                 }
                                 else -> continue
@@ -796,12 +801,13 @@ class FenixRepository @Inject constructor(
     }
 
     private fun parseQuality(name: String): String {
+        if (name.isBlank()) return ""
         val t = name.lowercase()
         return when {
-            t.contains("4k") || t.contains("2160") -> "4K"
-            t.contains("1080") || t.contains("fhd") -> "FHD"
-            t.contains("720") || t.contains("hd") -> "HD"
-            t.contains("480") || t.contains("sd") -> "SD"
+            Regex("""\b(2160p?|4k|uhd)\b""").containsMatchIn(t) -> "4K"
+            Regex("""\b(1080p?|1080i|fhd|full[\.\s_-]?hd)\b""").containsMatchIn(t) -> "FHD"
+            Regex("""\b(720p?|hd)\b""").containsMatchIn(t) -> "HD"
+            Regex("""\b(480p?|576p?|sd|dvdrip)\b""").containsMatchIn(t) -> "SD"
             else -> ""
         }
     }

@@ -263,7 +263,7 @@ ksp {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
-    implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material3:material3:1.3.2")
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.compose.animation:animation")
 
@@ -273,7 +273,7 @@ ksp {
     implementation("androidx.tv:tv-material:1.0.0")
 
     // Navigation
-    implementation("androidx.navigation:navigation-compose:2.7.6")
+    implementation("androidx.navigation:navigation-compose:2.8.9")
 
     // Hilt for DI — 2.57 (last stable for AGP 8.x). 2.59's Gradle plugin demands
     // AGP 9 + Gradle 9.1 and is broken there (dagger#5099). androidx.hilt is held at

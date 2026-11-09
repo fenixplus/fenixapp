@@ -63,8 +63,11 @@ import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Circle
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.outlined.FileDownload
+import androidx.compose.ui.text.style.TextAlign
 import com.arflix.tv.data.model.SportsAddonCapabilities
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
@@ -153,6 +156,7 @@ import com.arflix.tv.ui.components.AppTopBar
 import com.arflix.tv.ui.components.AppTopBarContentTopInset
 import com.arflix.tv.ui.components.SkeletonPosterCard
 import com.arflix.tv.ui.components.SkeletonMediaCard
+import com.arflix.tv.ui.components.SkeletonMobileHeroBanner
 import com.arflix.tv.ui.components.MobileHeroBanner
 import com.arflix.tv.ui.components.ProfileAvatarVisual
 import com.arflix.tv.util.LocalDeviceType
@@ -1437,137 +1441,170 @@ fun HomeScreen(
             }
         }
 
-        Box(modifier = Modifier.fillMaxSize().graphicsLayer { alpha = trailerOverlayAlpha.value }) {
-        HomeInputLayer(
-            categories = displayCategories,
-            cardLogoUrls = cardLogoUrls,
-            focusState = focusState,
-            limitRowsDuringStartup = limitRowsDuringStartup,
-            suppressSelectUntilMs = suppressSelectUntilMs,
-            contentStartPadding = contentStartPadding,
-            fastScrollThresholdMs = fastScrollThresholdMs,
-            usePosterCards = usePosterCards,
-            isContextMenuOpen = showContextMenu,
-            trailerIsPlaying = isTrailerPlaying,
-            onTrailerStop = { trailerSuppressed = true },
-            isMobile = isMobile,
-            heroItem = displayHeroItem,
-            heroOverviewOverride = displayHeroOverview,
-            onPlay = {
-                displayHeroItem?.let { item ->
-                    if (viewModel.isSportsHomeItem(item)) {
-                        openSportsHomeItem(item)
-                    } else if (viewModel.isIptvItem(item)) {
-                        onNavigateToTv(viewModel.getIptvChannelId(item), viewModel.getIptvStreamUrl(item.id))
-                    } else if (viewModel.isCollectionItem(item)) {
-                        onNavigateToCollection(item.status?.removePrefix("collection:").orEmpty())
-                    } else {
-                        onNavigateToDetails(item.mediaType, item.id, item.nextEpisode?.seasonNumber, item.nextEpisode?.episodeNumber)
-                    }
-                }
-            },
-            onDetails = {
-                displayHeroItem?.let { item ->
-                    if (viewModel.isSportsHomeItem(item)) {
-                        openSportsHomeItem(item)
-                    } else if (viewModel.isIptvItem(item)) {
-                        onNavigateToTv(viewModel.getIptvChannelId(item), viewModel.getIptvStreamUrl(item.id))
-                    } else if (viewModel.isCollectionItem(item)) {
-                        onNavigateToCollection(item.status?.removePrefix("collection:").orEmpty())
-                    } else {
-                        onNavigateToDetails(item.mediaType, item.id, null, null)
-                    }
-                }
-            },
-            currentProfile = currentProfile,
-            profileCount = profileCount,
-            clockFormat = uiState.clockFormat,
-            syncStatus = uiState.syncStatus,
-            hasUpdateBadge = uiState.hasUpdateBadge,
-            categoryHasMoreMap = uiState.categoryHasMoreMap,
-            smoothScrolling = uiState.smoothScrolling,
-            onLoadMoreCategory = { viewModel.loadNextPageForHomeCategory(it) },
-            onItemFocusedPrefetch = {},
-            onMobileCategoryVisiblePosition = { categoryId, lastVisibleItemIndex ->
-                viewModel.onMobileCategoryVisiblePosition(categoryId, lastVisibleItemIndex)
-            },
-            onNavigateToDetails = onNavigateToDetails,
-            onNavigateToCollection = onNavigateToCollection,
-            onNavigateToSearch = onNavigateToSearch,
-            onNavigateToWatchlist = onNavigateToWatchlist,
-            onNavigateToTv = onNavigateToTv,
-            onNavigateToDownloads = onNavigateToDownloads,
-            getIptvStreamUrl = { itemId -> viewModel.getIptvStreamUrl(itemId) },
-            isSportsHomeItem = { item -> viewModel.isSportsHomeItem(item) },
-            onSportsHomeItemClick = openSportsHomeItem,
-            onNavigateToSettings = onNavigateToSettings,
-            onSwitchProfile = onSwitchProfile,
-            onExitApp = onExitApp,
-            featuredTrailerKey = if (!isMobile && uiState.trailerInCards && uiState.trailerAutoPlay && !trailerSuppressed && !heroRowIsContinueWatching) focusedHomeTrailerKey else null,
-            reserveTrailerSpace = reserveTrailerSpace,
-            featuredTrailerDelayMs = uiState.trailerDelaySeconds * 1000L,
-            featuredTrailerVolume = if (uiState.trailerSoundEnabled) 1f else 0f,
-            netflix = if (netflixHome) {
-                val billboard = billboardItem?.let { item ->
-                    if (uiState.heroItem?.isSameHomeHero(item) == true) {
-                        uiState.heroItem
-                    } else {
-                        viewModel.getCachedHeroItem(item)
-                    }
-                }
-                NetflixHomeContent(
-                    billboardItem = billboard,
-                    billboardLogoUrl = billboard?.let { item ->
-                        uiState.heroLogoUrl?.takeIf { uiState.heroItem.isSameHomeHero(item) }
-                            ?: cardLogoUrls["${item.mediaType}_${item.id}"]
-                    },
-                    billboardTrailerKey = billboardTrailerKey,
-                    featuredItem = uiState.heroItem,
-                    cardTrailerKey = focusedHomeTrailerKey,
-                    cardTrailerDelayMs = uiState.trailerDelaySeconds * 1000L,
-                    trailerVolume = if (uiState.trailerSoundEnabled) 1f else 0f,
-                    featuredOverview = displayHeroOverview,
-                    channelPreviewPlayer = heroExoPlayer?.takeIf { isHeroIptv },
-                    channelPreviewItem = displayHeroItem?.takeIf { isHeroIptv },
-                    billboardHidden = billboardHidden
-                )
-            } else null,
-            onBillboardOpen = { item, play ->
-                onNavigateToDetails(
-                    item.mediaType, item.id,
-                    item.nextEpisode?.seasonNumber.takeIf { play },
-                    item.nextEpisode?.episodeNumber.takeIf { play }
-                )
-            },
-            onViewAllCategory = onNavigateToCategory,
-            onOpenContextMenu = { item, isContinue ->
-                contextMenuItem = item
-                contextMenuIsContinueWatching = isContinue
-                showContextMenu = true
-            }
-        )
-        } // end trailer-dim wrapper
-
-        if (showCinematicHomeLayer && !netflixHome) {
+        if (!uiState.isOffline) {
             Box(modifier = Modifier.fillMaxSize().graphicsLayer { alpha = trailerOverlayAlpha.value }) {
-            HomeHeroLayer(
-                heroItem = displayHeroItem,
-                heroLogoUrl = displayHeroLogo,
-                heroOverviewOverride = displayHeroOverview,
+            HomeInputLayer(
+                categories = displayCategories,
+                cardLogoUrls = cardLogoUrls,
+                focusState = focusState,
+                limitRowsDuringStartup = limitRowsDuringStartup,
+                suppressSelectUntilMs = suppressSelectUntilMs,
                 contentStartPadding = contentStartPadding,
+                fastScrollThresholdMs = fastScrollThresholdMs,
+                usePosterCards = usePosterCards,
+                isContextMenuOpen = showContextMenu,
+                trailerIsPlaying = isTrailerPlaying,
+                onTrailerStop = { trailerSuppressed = true },
                 isMobile = isMobile,
-                showBudget = uiState.showBudget,
+                heroItem = displayHeroItem,
+                heroOverviewOverride = displayHeroOverview,
+                onPlay = {
+                    displayHeroItem?.let { item ->
+                        if (viewModel.isSportsHomeItem(item)) {
+                            openSportsHomeItem(item)
+                        } else if (viewModel.isIptvItem(item)) {
+                            onNavigateToTv(viewModel.getIptvChannelId(item), viewModel.getIptvStreamUrl(item.id))
+                        } else if (viewModel.isCollectionItem(item)) {
+                            onNavigateToCollection(item.status?.removePrefix("collection:").orEmpty())
+                        } else {
+                            onNavigateToDetails(item.mediaType, item.id, item.nextEpisode?.seasonNumber, item.nextEpisode?.episodeNumber)
+                        }
+                    }
+                },
+                onDetails = {
+                    displayHeroItem?.let { item ->
+                        if (viewModel.isSportsHomeItem(item)) {
+                            openSportsHomeItem(item)
+                        } else if (viewModel.isIptvItem(item)) {
+                            onNavigateToTv(viewModel.getIptvChannelId(item), viewModel.getIptvStreamUrl(item.id))
+                        } else if (viewModel.isCollectionItem(item)) {
+                            onNavigateToCollection(item.status?.removePrefix("collection:").orEmpty())
+                        } else {
+                            onNavigateToDetails(item.mediaType, item.id, null, null)
+                        }
+                    }
+                },
+                currentProfile = currentProfile,
+                profileCount = profileCount,
+                clockFormat = uiState.clockFormat,
+                syncStatus = uiState.syncStatus,
+                hasUpdateBadge = uiState.hasUpdateBadge,
+                categoryHasMoreMap = uiState.categoryHasMoreMap,
+                smoothScrolling = uiState.smoothScrolling,
+                onLoadMoreCategory = { viewModel.loadNextPageForHomeCategory(it) },
+                onItemFocusedPrefetch = {},
+                onMobileCategoryVisiblePosition = { categoryId, lastVisibleItemIndex ->
+                    viewModel.onMobileCategoryVisiblePosition(categoryId, lastVisibleItemIndex)
+                },
                 onNavigateToDetails = onNavigateToDetails,
-                onNavigateToTv = { channelId, streamUrl -> onNavigateToTv(channelId, streamUrl) },
-                isIptvItem = { item -> viewModel.isIptvItem(item) },
-                getIptvChannelId = { item -> viewModel.getIptvChannelId(item) },
-                getIptvStreamUrl = { itemId -> viewModel.getIptvStreamUrl(itemId) }
+                onNavigateToCollection = onNavigateToCollection,
+                onNavigateToSearch = onNavigateToSearch,
+                onNavigateToWatchlist = onNavigateToWatchlist,
+                onNavigateToTv = onNavigateToTv,
+                onNavigateToDownloads = onNavigateToDownloads,
+                getIptvStreamUrl = { itemId -> viewModel.getIptvStreamUrl(itemId) },
+                isSportsHomeItem = { item -> viewModel.isSportsHomeItem(item) },
+                onSportsHomeItemClick = openSportsHomeItem,
+                onNavigateToSettings = onNavigateToSettings,
+                onSwitchProfile = onSwitchProfile,
+                onExitApp = onExitApp,
+                featuredTrailerKey = if (!isMobile && uiState.trailerInCards && uiState.trailerAutoPlay && !trailerSuppressed && !heroRowIsContinueWatching) focusedHomeTrailerKey else null,
+                reserveTrailerSpace = reserveTrailerSpace,
+                featuredTrailerDelayMs = uiState.trailerDelaySeconds * 1000L,
+                featuredTrailerVolume = if (uiState.trailerSoundEnabled) 1f else 0f,
+                netflix = if (netflixHome) {
+                    val billboard = billboardItem?.let { item ->
+                        if (uiState.heroItem?.isSameHomeHero(item) == true) {
+                            uiState.heroItem
+                        } else {
+                            viewModel.getCachedHeroItem(item)
+                        }
+                    }
+                    NetflixHomeContent(
+                        billboardItem = billboard,
+                        billboardLogoUrl = billboard?.let { item ->
+                            uiState.heroLogoUrl?.takeIf { uiState.heroItem.isSameHomeHero(item) }
+                                ?: cardLogoUrls["${item.mediaType}_${item.id}"]
+                        },
+                        billboardTrailerKey = billboardTrailerKey,
+                        featuredItem = uiState.heroItem,
+                        cardTrailerKey = focusedHomeTrailerKey,
+                        cardTrailerDelayMs = uiState.trailerDelaySeconds * 1000L,
+                        trailerVolume = if (uiState.trailerSoundEnabled) 1f else 0f,
+                        featuredOverview = displayHeroOverview,
+                        channelPreviewPlayer = heroExoPlayer?.takeIf { isHeroIptv },
+                        channelPreviewItem = displayHeroItem?.takeIf { isHeroIptv },
+                        billboardHidden = billboardHidden
+                    )
+                } else null,
+                onBillboardOpen = { item, play ->
+                    onNavigateToDetails(
+                        item.mediaType, item.id,
+                        item.nextEpisode?.seasonNumber.takeIf { play },
+                        item.nextEpisode?.episodeNumber.takeIf { play }
+                    )
+                },
+                onViewAllCategory = onNavigateToCategory,
+                onOpenContextMenu = { item, isContinue ->
+                    contextMenuItem = item
+                    contextMenuIsContinueWatching = isContinue
+                    showContextMenu = true
+                }
             )
             } // end trailer-dim wrapper
-        }
 
-        // Error state - show message when loading failed and no content
-        if (!uiState.isLoading && displayCategories.isEmpty() && uiState.error != null) {
+            if (showCinematicHomeLayer && !netflixHome) {
+                Box(modifier = Modifier.fillMaxSize().graphicsLayer { alpha = trailerOverlayAlpha.value }) {
+                HomeHeroLayer(
+                    heroItem = displayHeroItem,
+                    heroLogoUrl = displayHeroLogo,
+                    heroOverviewOverride = displayHeroOverview,
+                    contentStartPadding = contentStartPadding,
+                    isMobile = isMobile,
+                    showBudget = uiState.showBudget,
+                    onNavigateToDetails = onNavigateToDetails,
+                    onNavigateToTv = { channelId, streamUrl -> onNavigateToTv(channelId, streamUrl) },
+                    isIptvItem = { item -> viewModel.isIptvItem(item) },
+                    getIptvChannelId = { item -> viewModel.getIptvChannelId(item) },
+                    getIptvStreamUrl = { itemId -> viewModel.getIptvStreamUrl(itemId) }
+                )
+                } // end trailer-dim wrapper
+            }
+
+            // Error state - show message when loading failed and no content
+            if (!uiState.isLoading && displayCategories.isEmpty() && uiState.error != null) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(appBackgroundDark()),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Text(
+                            text = stringResource(R.string.no_results),
+                            style = ArflixTypography.sectionTitle,
+                            color = TextPrimary
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = uiState.error ?: stringResource(R.string.home_please_check_connection),
+                            style = ArflixTypography.body,
+                            color = TextSecondary
+                        )
+                        Spacer(modifier = Modifier.height(24.dp))
+                        androidx.tv.material3.Button(
+                            onClick = { viewModel.refresh() }
+                        ) {
+                            Text(stringResource(R.string.retry))
+                        }
+                    }
+                }
+            }
+        } else {
+            // Dedicated Offline State Screen
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -1576,24 +1613,142 @@ fun HomeScreen(
             ) {
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center
+                    verticalArrangement = Arrangement.Center,
+                    modifier = Modifier
+                        .padding(horizontal = 32.dp)
+                        .widthIn(max = 400.dp)
                 ) {
-                    Text(
-                        text = stringResource(R.string.no_results),
-                        style = ArflixTypography.sectionTitle,
-                        color = TextPrimary
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = uiState.error ?: stringResource(R.string.home_please_check_connection),
-                        style = ArflixTypography.body,
-                        color = TextSecondary
-                    )
-                    Spacer(modifier = Modifier.height(24.dp))
-                    androidx.tv.material3.Button(
-                        onClick = { viewModel.refresh() }
+                    Box(
+                        modifier = Modifier
+                            .size(80.dp)
+                            .clip(CircleShape)
+                            .background(Color.White.copy(alpha = 0.06f)),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Text(stringResource(R.string.retry))
+                        Icon(
+                            imageVector = Icons.Outlined.FileDownload,
+                            contentDescription = null,
+                            tint = AccentRed,
+                            modifier = Modifier.size(40.dp)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(24.dp))
+
+                    Text(
+                        text = "Você está offline",
+                        style = ArflixTypography.sectionTitle.copy(
+                            fontSize = 24.sp,
+                            fontWeight = FontWeight.Bold
+                        ),
+                        color = TextPrimary,
+                        textAlign = TextAlign.Center
+                    )
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    Text(
+                        text = "Não foi possível carregar a tela de início. Verifique sua conexão com a internet ou acesse seus títulos salvos para assistir offline.",
+                        style = ArflixTypography.body.copy(
+                            fontSize = 14.sp,
+                            lineHeight = 20.sp
+                        ),
+                        color = TextSecondary,
+                        textAlign = TextAlign.Center
+                    )
+
+                    Spacer(modifier = Modifier.height(32.dp))
+
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(14.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        if (isMobile) {
+                            // Botão 1: Tentar novamente (topo)
+                            androidx.compose.material3.Button(
+                                onClick = { viewModel.refresh() },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(50.dp),
+                                colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                                    containerColor = AccentRed,
+                                    contentColor = Color.White
+                                ),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Refresh,
+                                    contentDescription = null,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Text(
+                                    text = stringResource(R.string.retry),
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 15.sp
+                                )
+                            }
+
+                            // Botão 2: Abrir downloads (baixo)
+                            androidx.compose.material3.Button(
+                                onClick = onNavigateToDownloads,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(50.dp),
+                                shape = RoundedCornerShape(12.dp),
+                                colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                                    containerColor = Color(0xFF262626),
+                                    contentColor = Color.White
+                                ),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.25f))
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.FileDownload,
+                                    contentDescription = null,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Text(
+                                    text = if (uiState.completedDownloadsCount > 0) {
+                                        "Abrir downloads (${uiState.completedDownloadsCount})"
+                                    } else {
+                                        "Abrir downloads"
+                                    },
+                                    color = Color.White,
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 15.sp
+                                )
+                            }
+                        } else {
+                            androidx.tv.material3.Button(
+                                onClick = { viewModel.refresh() },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(50.dp)
+                            ) {
+                                Text(stringResource(R.string.retry), color = Color.White)
+                            }
+
+                            androidx.tv.material3.OutlinedButton(
+                                onClick = onNavigateToDownloads,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(50.dp)
+                            ) {
+                                Text(
+                                    if (uiState.completedDownloadsCount > 0) {
+                                        "Abrir downloads (${uiState.completedDownloadsCount})"
+                                    } else {
+                                        "Abrir downloads"
+                                    },
+                                    color = Color.White
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -2391,7 +2546,58 @@ private fun MobileHeroCarousel(
         }.distinctBy { "${it.mediaType}_${it.id}" }
     }
 
-    if (heroItems.isEmpty()) return
+    if (heroItems.isEmpty()) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            // Profile avatar + search icon row — above the pager, respects status bar
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .statusBarsPadding()
+                    .padding(start = 26.dp, end = 26.dp, top = 12.dp, bottom = 10.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (currentProfile != null) {
+                    Box(
+                        modifier = Modifier
+                            .size(38.dp)
+                            .clip(CircleShape)
+                            .clickable { onSwitchProfile() }
+                    ) {
+                        ProfileAvatarVisual(
+                            profile = currentProfile,
+                            letterFontSize = 15.sp,
+                            iconPadding = 5.dp
+                        )
+                    }
+                } else {
+                    Spacer(modifier = Modifier.size(38.dp))
+                }
+                Icon(
+                    imageVector = Icons.Filled.Search,
+                    contentDescription = stringResource(R.string.search),
+                    tint = Color.White,
+                    modifier = Modifier
+                        .size(26.dp)
+                        .clickable { onNavigateToSearch() }
+                )
+            }
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 64.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                SkeletonMobileHeroBanner(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(3f / 4f)
+                )
+            }
+        }
+        return
+    }
 
     // Circular paging: use a large virtual page count that's a multiple of heroItems.size
     // so page % heroItems.size always maps correctly and starts at item[0].
@@ -2455,7 +2661,7 @@ private fun MobileHeroCarousel(
             state = pagerState,
             contentPadding = PaddingValues(horizontal = 64.dp),
             pageSpacing = 18.dp,
-            beyondBoundsPageCount = 1,
+            beyondViewportPageCount = 1,
             modifier = Modifier.fillMaxWidth()
         ) { page ->
             val item = heroItems[page % heroItems.size]

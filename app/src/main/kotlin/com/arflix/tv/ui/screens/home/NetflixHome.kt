@@ -35,7 +35,13 @@ import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListLayoutInfo
+import androidx.compose.foundation.lazy.LazyListPrefetchScope
+import androidx.compose.foundation.lazy.LazyListPrefetchStrategy
+import androidx.compose.foundation.lazy.layout.LazyLayoutPrefetchState
+import androidx.compose.foundation.lazy.layout.NestedPrefetchScope
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -112,6 +118,7 @@ import com.arflix.tv.ui.components.ImdbSvgRatingBadge
 import com.arflix.tv.ui.components.TrailerPlayer
 import com.arflix.tv.ui.components.WatchedBadge
 import com.arflix.tv.ui.components.MediaCard
+import com.arflix.tv.ui.components.SkeletonBox
 import com.arflix.tv.ui.components.rememberCatalogueRowLayoutMode
 import com.arflix.tv.ui.theme.ArflixTypography
 import com.arflix.tv.util.Constants
@@ -315,11 +322,13 @@ internal fun NetflixTvHomeRowsLayer(
         // Focused-row card height: room for the row title above, the description
         // below and a peek of the next row.
         val bigCardHeight = (maxHeight * 0.42f).coerceIn(170.dp, 330.dp)
-        val listState = rememberLazyListState()
+        @OptIn(ExperimentalFoundationApi::class)
+        val listState = rememberLazyListState(prefetchStrategy = remember { NetflixNextRowPrefetchStrategy() })
         val targetIndex = if (focusState.isHeroFocused) 0 else focusState.currentRowIndex + 1
         val focusedRowId = if (focusState.isHeroFocused) null else categories.getOrNull(focusState.currentRowIndex)?.id
         var appliedTarget by remember { mutableIntStateOf(-1) }
         var appliedScrollReset by rememberSaveable { mutableIntStateOf(0) }
+        val verticalOffset = remember { Animatable(0f) }
         var verticalAnimating by remember { mutableStateOf(false) }
         LaunchedEffect(targetIndex, focusedRowId, focusState.scrollResetRequest) {
             val previousTarget = appliedTarget
@@ -338,12 +347,16 @@ internal fun NetflixTvHomeRowsLayer(
             if (!reset && previousTarget >= 0 && target != null && abs(targetIndex - previousTarget) <= 4) {
                 verticalAnimating = true
                 try {
-                    listState.animateScrollToItem(targetIndex)
+                    verticalOffset.snapTo(target.offset.toFloat())
+                    listState.requestScrollToItem(targetIndex, -verticalOffset.value.roundToInt())
+                    verticalOffset.animateTo(0f, tween(NETFLIX_RAIL_MORPH_MS, easing = FastOutSlowInEasing)) {
+                        listState.requestScrollToItem(targetIndex, -value.roundToInt())
+                    }
                 } finally {
                     verticalAnimating = false
                 }
             } else {
-                listState.scrollToItem(targetIndex)
+                listState.scrollToItem(if (reset) 0 else targetIndex)
             }
         }
         // Rows inserted or removed above the focused one (late catalog / channel loads)
@@ -462,7 +475,7 @@ internal fun NetflixTvHomeRowsLayer(
                                 rowIndex < focusState.currentRowIndex,
                             focusedItemIndex = focusedItemIndex,
                             restingItemIndex = focusState.rowItemIndicesByCategoryId[category.id] ?: 0,
-                            usePosterCards = rowUsePosterCards,
+                            usePosterCards = true,
                             bigCardHeight = bigCardHeight,
                             startPadding = contentStartPadding,
                             categoryHasMore = rowHasMore,
@@ -559,6 +572,11 @@ private fun NetflixBillboard(
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize()
                 )
+            } else {
+                SkeletonBox(
+                    modifier = Modifier.fillMaxSize(),
+                    shape = RoundedCornerShape(13.dp)
+                )
             }
             if (autoplayEnabled && trailerKey != null) {
                 TrailerPlayer(
@@ -569,7 +587,7 @@ private fun NetflixBillboard(
                 )
             }
 
-            if (item != null) {
+            if (item != null && !item.isPlaceholder) {
                 val isRtl = LocalLayoutDirection.current == LayoutDirection.Rtl
                 Box(
                     modifier = Modifier
@@ -606,6 +624,33 @@ private fun NetflixBillboard(
                         .fillMaxWidth(0.58f)
                         .padding(start = 36.dp, bottom = 30.dp)
                 )
+            } else {
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .fillMaxWidth(0.58f)
+                        .padding(start = 36.dp, bottom = 30.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    SkeletonBox(
+                        modifier = Modifier
+                            .fillMaxWidth(0.5f)
+                            .height(44.dp),
+                        shape = RoundedCornerShape(8.dp)
+                    )
+                    SkeletonBox(
+                        modifier = Modifier
+                            .fillMaxWidth(0.7f)
+                            .height(16.dp),
+                        shape = RoundedCornerShape(8.dp)
+                    )
+                    SkeletonBox(
+                        modifier = Modifier
+                            .fillMaxWidth(0.35f)
+                            .height(14.dp),
+                        shape = RoundedCornerShape(8.dp)
+                    )
+                }
             }
         }
     }
@@ -777,7 +822,7 @@ private fun NetflixContentRow(
     collapsesOffScreen: Boolean,
     focusedItemIndex: Int,
     restingItemIndex: Int,
-    usePosterCards: Boolean,
+    usePosterCards: Boolean = true,
     bigCardHeight: Dp,
     startPadding: Dp,
     categoryHasMore: Boolean,
@@ -794,7 +839,11 @@ private fun NetflixContentRow(
 ) {
     val isContinueWatching = category.id == "continue_watching"
     val isRanked = category.title.contains("Top 10", ignoreCase = true)
-    val rowState = rememberLazyListState()
+    // Prefetching this row from the vertical list also builds its first cards.
+    @OptIn(ExperimentalFoundationApi::class)
+    val rowState = rememberLazyListState(
+        prefetchStrategy = remember { LazyListPrefetchStrategy(nestedPrefetchItemCount = 3) }
+    )
     val items = remember(category.items, showViewAll) {
         if (category.items.isEmpty()) {
             (1..8).map { MediaItem(id = -it, title = "", mediaType = MediaType.MOVIE, isPlaceholder = true) }
@@ -826,10 +875,12 @@ private fun NetflixContentRow(
     val sizeSpec: AnimationSpec<Dp> =
         if (collapseOffScreen) snap() else tween(NETFLIX_RAIL_MORPH_MS, easing = FastOutSlowInEasing)
 
+    // The focused title always sits in the first slot; a resting row keeps its position.
     val anchorIndex = (if (isCurrentRow) focusedItemIndex else restingItemIndex)
         .coerceIn(0, (items.size - 1 + if (hasViewAllCard) 1 else 0).coerceAtLeast(0))
     var lastAnchor by remember { mutableIntStateOf(-1) }
     var appliedScrollReset by rememberSaveable { mutableIntStateOf(0) }
+    val railOffset = remember { Animatable(0f) }
     LaunchedEffect(anchorIndex, isCurrentRow, scrollResetRequest) {
         val previousAnchor = lastAnchor
         val reset = appliedScrollReset != scrollResetRequest
@@ -839,7 +890,13 @@ private fun NetflixContentRow(
         if (!reset && isCurrentRow && previousAnchor >= 0 &&
             abs(anchorIndex - previousAnchor) <= 3 && visibleAnchor != null
         ) {
-            rowState.animateScrollToItem(anchorIndex)
+            // Anchor the incoming card, not the outgoing item's changing width. A stock
+            // scroll animation chases a moving destination while the old card shrinks.
+            railOffset.snapTo(visibleAnchor.offset.toFloat())
+            rowState.requestScrollToItem(anchorIndex, -railOffset.value.roundToInt())
+            railOffset.animateTo(0f, tween(NETFLIX_RAIL_MORPH_MS, easing = FastOutSlowInEasing)) {
+                rowState.requestScrollToItem(anchorIndex, -value.roundToInt())
+            }
         } else {
             rowState.scrollToItem(if (reset) 0 else anchorIndex)
         }
@@ -1381,3 +1438,28 @@ internal fun netflixShortOverview(overview: String): String {
     }
     return text
 }
+
+/**
+ * The vertical rails move only through requestScrollToItem / scrollToItem, which never call the
+ * default prefetcher (it reacts to scroll deltas). Without this, each newly revealed row is
+ * composed and measured in one frame in the middle of the morph animation. After every layout,
+ * schedule the row just below the last visible one so it is built ahead of time.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+private class NetflixNextRowPrefetchStrategy : LazyListPrefetchStrategy {
+    private var scheduledIndex = -1
+    private var handle: LazyLayoutPrefetchState.PrefetchHandle? = null
+
+    override fun LazyListPrefetchScope.onScroll(delta: Float, layoutInfo: LazyListLayoutInfo) = Unit
+
+    override fun LazyListPrefetchScope.onVisibleItemsUpdated(layoutInfo: LazyListLayoutInfo) {
+        val next = (layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: return) + 1
+        if (next == scheduledIndex || next >= layoutInfo.totalItemsCount) return
+        handle?.cancel()
+        scheduledIndex = next
+        handle = schedulePrefetch(next)
+    }
+
+    override fun NestedPrefetchScope.onNestedPrefetch(firstVisibleItemIndex: Int) = Unit
+}
+

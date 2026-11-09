@@ -136,6 +136,13 @@ sealed class Screen(val route: String) {
     }
 }
 
+@dagger.hilt.EntryPoint
+@dagger.hilt.InstallIn(dagger.hilt.components.SingletonComponent::class)
+interface AppNavigationEntryPoint {
+    fun networkMonitor(): com.arflix.tv.network.NetworkMonitor
+    fun downloadManager(): com.arflix.tv.data.download.DownloadManager
+}
+
 /**
  * Main navigation graph
  */
@@ -182,6 +189,15 @@ fun AppNavigation(
     var showExitKidsPinDialog by remember { mutableStateOf(false) }
     var exitKidsPinError by remember { mutableStateOf("") }
     val context = LocalContext.current
+
+    val navEntryPoint = remember(context) {
+        dagger.hilt.android.EntryPointAccessors.fromApplication(
+            context.applicationContext,
+            AppNavigationEntryPoint::class.java
+        )
+    }
+    val networkMonitor = remember(navEntryPoint) { navEntryPoint.networkMonitor() }
+    val downloadManager = remember(navEntryPoint) { navEntryPoint.downloadManager() }
 
     val protectedOnSwitchProfile: () -> Unit = {
         if (isKids && !parentPin.isNullOrEmpty()) {
@@ -422,7 +438,16 @@ fun AppNavigation(
         composable(Screen.ProfileSelection.route) {
             ProfileSelectionScreen(
                 onProfileSelected = {
-                    if (telegramRepository.isAuthenticated()) {
+                    val isOnline = networkMonitor.isConnected
+                    val hasCompletedDownloads = downloadManager.downloads.value.any {
+                        it.status == com.arflix.tv.data.download.DownloadStatus.COMPLETED
+                    }
+
+                    if (!isOnline && hasCompletedDownloads) {
+                        navController.navigate(Screen.Downloads.route) {
+                            popUpTo(Screen.ProfileSelection.route) { inclusive = true }
+                        }
+                    } else if (telegramRepository.isAuthenticated()) {
                         navController.navigate(Screen.Home.route) {
                             popUpTo(Screen.ProfileSelection.route) { inclusive = true }
                         }

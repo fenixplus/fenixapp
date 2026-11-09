@@ -1276,18 +1276,16 @@ class DetailsViewModel @Inject constructor(
         val mediaType = currentItem?.mediaType ?: MediaType.MOVIE
         val mediaId = currentItem?.id ?: 0
         val baseTitle = currentItem?.title ?: ""
-        val title = if (mediaType == MediaType.TV && episode != null) {
-            "$baseTitle - T${episode.seasonNumber}:E${episode.episodeNumber}"
-        } else {
-            baseTitle
-        }
+        val title = baseTitle
         val subtitle = if (mediaType == MediaType.TV && episode != null) {
-            episode.name.ifBlank { stream.source }
+            episode.name.ifBlank { "" }
         } else {
-            stream.quality.ifBlank { stream.source }
+            ""
         }
         val posterUrl = episode?.stillPath ?: currentItem?.image
-        val sourceName = stream.behaviorHints?.filename?.takeIf { it.isNotBlank() } ?: stream.source
+        val sourceName = stream.source.takeIf { it.isNotBlank() }
+            ?: stream.behaviorHints?.filename?.takeIf { it.isNotBlank() }
+            ?: ""
         val audioTag = com.arflix.tv.data.download.DownloadItem.parseAudioLabel(stream.source, stream.description, stream.rawLabel)
         val remoteFileId = android.net.Uri.parse(url).getQueryParameter("remote")
 

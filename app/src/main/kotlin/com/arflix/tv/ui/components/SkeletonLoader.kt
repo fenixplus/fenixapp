@@ -7,6 +7,7 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -34,6 +35,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.unit.sp
 import com.arflix.tv.util.LocalDeviceType
+import com.arflix.tv.ui.theme.BackgroundCard
+import com.arflix.tv.ui.theme.BorderLight
 import androidx.tv.foundation.lazy.list.TvLazyRow
 
 /**
@@ -486,6 +489,57 @@ fun SkeletonHomePage(
         repeat(rowCount) { index ->
             SkeletonCategoryRow(
                 cardType = if (index == 0) SkeletonCardType.MEDIA else SkeletonCardType.POSTER
+            )
+        }
+    }
+}
+
+/**
+ * Skeleton for the mobile hero banner. The caller supplies the resolved card size.
+ */
+@Composable
+fun SkeletonMobileHeroBanner(
+    compactContent: Boolean = false,
+    modifier: Modifier = Modifier
+) {
+    val bannerShape = RoundedCornerShape(16.dp)
+    Box(
+        modifier = modifier
+            .clip(bannerShape)
+            .background(BackgroundCard)
+            .border(width = 1.dp, color = BorderLight, shape = bannerShape)
+    ) {
+        SkeletonBox(
+            modifier = Modifier.fillMaxSize(),
+            shape = bannerShape
+        )
+
+        Column(
+            modifier = Modifier
+                .align(androidx.compose.ui.Alignment.BottomCenter)
+                .fillMaxWidth()
+                .padding(horizontal = if (compactContent) 14.dp else 20.dp)
+                .padding(bottom = if (compactContent) 12.dp else 28.dp),
+            horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(if (compactContent) 5.dp else 10.dp)
+        ) {
+            SkeletonBox(
+                modifier = Modifier
+                    .fillMaxWidth(0.65f)
+                    .height(if (compactContent) 24.dp else 32.dp),
+                shape = RoundedCornerShape(8.dp)
+            )
+            SkeletonBox(
+                modifier = Modifier
+                    .fillMaxWidth(0.40f)
+                    .height(14.dp),
+                shape = RoundedCornerShape(8.dp)
+            )
+            SkeletonBox(
+                modifier = Modifier
+                    .fillMaxWidth(0.25f)
+                    .height(12.dp),
+                shape = RoundedCornerShape(8.dp)
             )
         }
     }

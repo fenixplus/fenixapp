@@ -145,6 +145,34 @@ fun DownloadsScreen(
                 )
             }
 
+            if (uiState.isOffline) {
+                Box(
+                    modifier = Modifier
+                        .padding(bottom = 12.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(Color(0xFF2C2C2E))
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFFFF9F0A))
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Modo Offline • Exibindo apenas conteúdos baixados",
+                            fontSize = 12.sp,
+                            color = Color.White.copy(alpha = 0.9f),
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+            }
+
             // Storage Stats Card
             StorageUsageCard(
                 totalDownloadsFormatted = uiState.totalDownloadsFormatted,
@@ -337,10 +365,26 @@ private fun ActiveDownloadCard(
     onCancel: () -> Unit
 ) {
     val displayTitle = remember(item.title, item.seasonNumber, item.episodeNumber) {
+        val cleanTitle = item.title.replace(Regex("""\s*-\s*T\d+:E\d+.*$"""), "").trim()
         if (item.seasonNumber != null && item.episodeNumber != null) {
-            "T${item.seasonNumber}:E${item.episodeNumber} - ${item.title}"
+            "T${item.seasonNumber}:E${item.episodeNumber} - $cleanTitle"
         } else {
-            item.title
+            cleanTitle
+        }
+    }
+
+    val displayLabel = remember(item) {
+        item.sourceTitle?.takeIf { it.isNotBlank() }
+            ?: (if (item.mediaType == MediaType.MOVIE) item.subtitle?.takeIf { it.isNotBlank() && it != item.title } else null)
+            ?: item.audioLabel
+    }
+
+    val activeSubtitle = remember(item.subtitle, item.title, item.mediaType, displayLabel) {
+        if (item.mediaType == MediaType.TV) {
+            val epName = item.subtitle?.trim()?.takeIf { it.isNotBlank() && it != item.title }
+            listOfNotNull(epName, displayLabel).joinToString(" • ")
+        } else {
+            displayLabel
         }
     }
 
@@ -423,10 +467,10 @@ private fun ActiveDownloadCard(
                     overflow = TextOverflow.Ellipsis
                 )
 
-                if (!item.subtitle.isNullOrBlank() && item.subtitle != item.title) {
+                if (!activeSubtitle.isNullOrBlank()) {
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
-                        text = item.subtitle,
+                        text = activeSubtitle,
                         style = ArflixTypography.caption.copy(fontSize = 12.sp),
                         color = TextSecondary,
                         maxLines = 1,
@@ -543,10 +587,11 @@ private fun CompletedDownloadCard(
     var menuOpen by remember { mutableStateOf(false) }
 
     val displayTitle = remember(item.title, item.seasonNumber, item.episodeNumber) {
+        val cleanTitle = item.title.replace(Regex("""\s*-\s*T\d+:E\d+.*$"""), "").trim()
         if (item.seasonNumber != null && item.episodeNumber != null) {
-            "T${item.seasonNumber}:E${item.episodeNumber} - ${item.title}"
+            "T${item.seasonNumber}:E${item.episodeNumber} - $cleanTitle"
         } else {
-            item.title
+            cleanTitle
         }
     }
 
@@ -559,11 +604,13 @@ private fun CompletedDownloadCard(
         }
     }
 
-    val resolvedAudio = remember(item) {
-        item.audioLabel ?: DownloadItem.parseAudioLabel(item.sourceTitle ?: item.subtitle ?: item.title)
+    val displayLabel = remember(item) {
+        item.sourceTitle?.takeIf { it.isNotBlank() }
+            ?: (if (item.mediaType == MediaType.MOVIE) item.subtitle?.takeIf { it.isNotBlank() && it != item.title } else null)
+            ?: item.audioLabel
     }
     val resolvedQuality = remember(item) {
-        DownloadItem.parseQualityLabel(item.quality, item.sourceTitle)
+        item.quality.takeIf { it.isNotBlank() } ?: ""
     }
 
     Row(
@@ -631,45 +678,46 @@ private fun CompletedDownloadCard(
 
             Spacer(modifier = Modifier.height(6.dp))
 
-            // Badges row: Quality, Dublado/Legendado/Nacional, and Size
+            // Badges row: Label, Quality (if not already in label), and Size
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                if (resolvedQuality.isNotBlank()) {
+                // Label real do bot / fonte (ex: "Áudio Português - HD", "Dublado", "Legenda Português", etc.)
+                if (!displayLabel.isNullOrBlank()) {
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(4.dp))
                             .background(Color.White.copy(alpha = 0.12f))
-                            .padding(horizontal = 5.dp, vertical = 2.dp)
+                            .border(0.8.dp, Color.White.copy(alpha = 0.16f), RoundedCornerShape(4.dp))
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
                     ) {
                         Text(
-                            text = resolvedQuality,
+                            text = displayLabel,
                             style = ArflixTypography.caption.copy(fontSize = 10.sp, fontWeight = FontWeight.Bold),
                             color = TextPrimary
                         )
                     }
                 }
 
-                if (!resolvedAudio.isNullOrBlank()) {
-                    val (badgeBg, badgeText) = when (resolvedAudio.uppercase()) {
-                        "DUBLADO" -> Color(0xFF2E7D32).copy(alpha = 0.35f) to Color(0xFF81C784)
-                        "LEGENDADO" -> Color(0xFFE65100).copy(alpha = 0.35f) to Color(0xFFFFB74D)
-                        "NACIONAL" -> Color(0xFF1B5E20).copy(alpha = 0.40f) to Color(0xFFA5D6A7)
-                        "DUAL ÁUDIO" -> Color(0xFF4A148C).copy(alpha = 0.35f) to Color(0xFFCE93D8)
-                        else -> Color(0xFF00695C).copy(alpha = 0.35f) to Color(0xFF80CBC4)
-                    }
+                // Resolução adicional caso o label não traga a qualidade explícita
+                val labelHasResolution = displayLabel?.let { lbl ->
+                    val upper = lbl.uppercase()
+                    upper.contains("4K") || upper.contains("FHD") || upper.contains("1080") ||
+                    upper.contains("HD") || upper.contains("720") || upper.contains("SD") || upper.contains("480")
+                } ?: false
+
+                if (!labelHasResolution && resolvedQuality.isNotBlank()) {
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(4.dp))
-                            .background(badgeBg)
-                            .border(0.8.dp, badgeText.copy(alpha = 0.5f), RoundedCornerShape(4.dp))
+                            .background(Color.White.copy(alpha = 0.08f))
                             .padding(horizontal = 5.dp, vertical = 2.dp)
                     ) {
                         Text(
-                            text = resolvedAudio,
+                            text = resolvedQuality,
                             style = ArflixTypography.caption.copy(fontSize = 10.sp, fontWeight = FontWeight.Bold),
-                            color = badgeText
+                            color = TextPrimary
                         )
                     }
                 }

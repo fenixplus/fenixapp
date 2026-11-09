@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.takeWhile
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -83,8 +84,10 @@ class DownloadManager @Inject constructor(
 
                             if (item.status == DownloadStatus.COMPLETED) {
                                 val expectedTotal = item.totalBytes
-                                val isTrulyCompleted = actualFile != null && actualFile.length() > 0L &&
-                                    (expectedTotal <= 0L || actualFile.length() >= (expectedTotal * 0.99).toLong())
+                                // Um vídeo de filme ou série nunca tem menos de 500KB (arquivos de 30-100KB são avatares/miniaturas)
+                                val isTinyCorrupt = actualFile != null && actualFile.length() < 500_000L
+                                val isTrulyCompleted = actualFile != null && !isTinyCorrupt && actualFile.length() > 0L &&
+                                    (expectedTotal <= 0L || actualFile.length() >= (expectedTotal * 0.95).toLong())
 
                                 if (isTrulyCompleted && actualFile != null) {
                                     item.copy(
@@ -95,10 +98,13 @@ class DownloadManager @Inject constructor(
                                         errorMessage = null
                                     )
                                 } else {
-                                    // Arquivo físico sumiu ou está incompleto
+                                    // Arquivo físico sumiu, está incompleto ou é uma miniatura minúscula corrompida
+                                    if (isTinyCorrupt) {
+                                        try { actualFile?.delete() } catch (_: Exception) {}
+                                    }
                                     item.copy(
                                         status = DownloadStatus.FAILED,
-                                        errorMessage = "Arquivo corrompido ou não encontrado",
+                                        errorMessage = "Arquivo corrompido ou incompleto",
                                         downloadedBytes = 0L,
                                         speedBytesPerSec = 0L
                                     )
@@ -155,8 +161,10 @@ class DownloadManager @Inject constructor(
     /**
      * Internal helper to pause any currently running download.
      * Ensures strict single-download concurrency ("ao startar um parar o outro").
+     * When [requeue] is true, the active download is moved back to QUEUED status so it resumes
+     * automatically once the newly prioritized download completes.
      */
-    suspend fun pauseActiveDownload(exceptId: String? = null) {
+    suspend fun pauseActiveDownload(exceptId: String? = null, requeue: Boolean = false) {
         val currentActiveId = activeDownloadId ?: return
         if (currentActiveId == exceptId) return
 
@@ -167,7 +175,8 @@ class DownloadManager @Inject constructor(
             if (idx >= 0) {
                 val item = current[idx]
                 fileIdToCancel = item.fileId
-                current[idx] = item.copy(status = DownloadStatus.PAUSED, speedBytesPerSec = 0L)
+                val newStatus = if (requeue) DownloadStatus.QUEUED else DownloadStatus.PAUSED
+                current[idx] = item.copy(status = newStatus, speedBytesPerSec = 0L)
                 _downloads.value = current
                 saveToDisk(current)
             }
@@ -208,12 +217,13 @@ class DownloadManager @Inject constructor(
         val resolvedRemoteId = remoteFileId
             ?: runCatching { android.net.Uri.parse(streamUrl).getQueryParameter("remote") }.getOrNull()?.takeIf { it.isNotBlank() }
 
-        scope.launch {
-            // Strict single-active-download: pause any running download before starting the new one
-            if (activeDownloadId != null && activeDownloadId != itemId) {
-                pauseActiveDownload(exceptId = itemId)
-            }
+        // Checagem de recuperação instantânea se o arquivo físico já existe completo em downloadsDir
+        val physicalFile = fileUniqueId?.takeIf { it.isNotBlank() }?.let { File(downloadsDir, "${it}.mp4") }
+            ?: File(downloadsDir, "${itemId}_${fileId}.mp4")
+        val isAlreadyCompletedOnDisk = physicalFile.exists() && physicalFile.length() > 500_000L &&
+            (totalBytes <= 0L || physicalFile.length() >= (totalBytes * 0.95).toLong())
 
+        scope.launch {
             mutex.withLock {
                 val current = _downloads.value.toMutableList()
                 val idx = current.indexOfFirst { it.id == itemId }
@@ -231,9 +241,11 @@ class DownloadManager @Inject constructor(
                     posterUrl = posterUrl,
                     quality = resolvedQuality,
                     streamUrl = streamUrl,
-                    totalBytes = totalBytes,
-                    status = DownloadStatus.QUEUED,
-                    createdAt = System.currentTimeMillis(),
+                    totalBytes = if (isAlreadyCompletedOnDisk) physicalFile.length() else totalBytes,
+                    downloadedBytes = if (isAlreadyCompletedOnDisk) physicalFile.length() else (if (idx >= 0) current[idx].downloadedBytes else 0L),
+                    localPath = if (isAlreadyCompletedOnDisk) physicalFile.absolutePath else (if (idx >= 0) current[idx].localPath else null),
+                    status = if (isAlreadyCompletedOnDisk) DownloadStatus.COMPLETED else DownloadStatus.QUEUED,
+                    createdAt = if (idx >= 0) current[idx].createdAt else System.currentTimeMillis(),
                     sourceTitle = sourceTitle,
                     audioLabel = resolvedAudio,
                     speedBytesPerSec = 0L
@@ -241,12 +253,14 @@ class DownloadManager @Inject constructor(
                 if (idx >= 0) {
                     current[idx] = newItem
                 } else {
-                    current.add(0, newItem)
+                    current.add(newItem)
                 }
                 _downloads.value = current
                 saveToDisk(current)
             }
-            processNextInQueue()
+            if (!isAlreadyCompletedOnDisk) {
+                processNextInQueue()
+            }
         }
         return true
     }
@@ -282,9 +296,9 @@ class DownloadManager @Inject constructor(
 
     fun resumeDownload(id: String) {
         scope.launch {
-            // Strict single-active-download: pause any running download before resuming this one
+            // Strict single-active-download: if another download is running, requeue it so it resumes after this one
             if (activeDownloadId != null && activeDownloadId != id) {
-                pauseActiveDownload(exceptId = id)
+                pauseActiveDownload(exceptId = id, requeue = true)
             }
 
             mutex.withLock {
@@ -341,7 +355,9 @@ class DownloadManager @Inject constructor(
         scope.launch {
             mutex.withLock {
                 if (activeDownloadId != null) return@launch // Strict: only one download at a time
-                val nextItem = _downloads.value.firstOrNull { it.status == DownloadStatus.QUEUED } ?: return@launch
+                val nextItem = _downloads.value
+                    .filter { it.status == DownloadStatus.QUEUED }
+                    .minByOrNull { it.createdAt } ?: return@launch
                 startDownload(nextItem)
             }
         }
@@ -388,6 +404,14 @@ class DownloadManager @Inject constructor(
                 }
 
                 // 2. Validate and resolve TDLib file ID across process restart
+                // Os IDs numéricos de arquivo no TDLib são efêmeros por sessão.
+                // O canonicalRemoteId (iniciado por BAAC para vídeos ou BQAC para documentos) é a única identidade persistente.
+                val canonicalRemoteId = runCatching {
+                    android.net.Uri.parse(item.streamUrl).getQueryParameter("remote")
+                }.getOrNull()?.takeIf { it.isNotBlank() && (it.startsWith("BAAC") || it.startsWith("BQAC")) }
+                    ?: item.remoteFileId?.takeIf { it.isNotBlank() && (it.startsWith("BAAC") || it.startsWith("BQAC")) }
+                    ?: item.remoteFileId?.takeIf { it.isNotBlank() }
+
                 var currentFileId = item.fileId
                 var resolvedFile: TdApi.File? = try {
                     telegramClient.getFile(currentFileId)
@@ -395,28 +419,31 @@ class DownloadManager @Inject constructor(
                     null
                 }
 
-                val remoteId = item.remoteFileId?.takeIf { it.isNotBlank() }
-                    ?: runCatching { android.net.Uri.parse(item.streamUrl).getQueryParameter("remote") }.getOrNull()?.takeIf { it.isNotBlank() }
+                // Se o arquivo resolvido não bater com o canonicalRemoteId, o número de fileId foi
+                // reciclado pelo TDLib na nova sessão para outro arquivo (ex: avatar/miniatura de 30KB)!
+                val isMismatched = resolvedFile != null && !canonicalRemoteId.isNullOrBlank() &&
+                    resolvedFile.remote?.id != canonicalRemoteId
 
-                if (resolvedFile == null || resolvedFile.id == 0) {
-                    if (!remoteId.isNullOrBlank()) {
-                        Log.i(TAG, "Resolving stale fileId $currentFileId via remoteId $remoteId...")
+                if (resolvedFile == null || resolvedFile.id == 0 || isMismatched) {
+                    if (!canonicalRemoteId.isNullOrBlank()) {
+                        Log.i(TAG, "Resolvendo stale/mismatched fileId $currentFileId via canonical remoteId $canonicalRemoteId...")
                         val rFile = try {
-                            telegramClient.getRemoteFile(remoteId)
+                            telegramClient.getRemoteFile(canonicalRemoteId)
                         } catch (e: Exception) {
-                            Log.w(TAG, "Failed looking up remoteId $remoteId: ${e.message}")
+                            Log.w(TAG, "Falha ao buscar remoteId $canonicalRemoteId: ${e.message}")
                             null
                         }
                         if (rFile != null && rFile.id != 0) {
-                            Log.i(TAG, "Successfully resolved remoteId $remoteId to new fileId ${rFile.id} (was $currentFileId)")
+                            Log.i(TAG, "Sucesso: remoteId $canonicalRemoteId resolvido para o fileId real ${rFile.id} (era $currentFileId, tamanho=${rFile.size}B)")
                             currentFileId = rFile.id
                             resolvedFile = rFile
                             mutex.withLock {
                                 _downloads.value = _downloads.value.map {
                                     if (it.id == item.id) it.copy(
                                         fileId = rFile.id,
-                                        remoteFileId = remoteId,
-                                        fileUniqueId = rFile.remote?.uniqueId ?: it.fileUniqueId
+                                        remoteFileId = canonicalRemoteId,
+                                        fileUniqueId = rFile.remote?.uniqueId ?: it.fileUniqueId,
+                                        totalBytes = if (rFile.size > 0L) rFile.size else it.totalBytes
                                     ) else it
                                 }
                                 saveToDisk(_downloads.value)
@@ -443,142 +470,157 @@ class DownloadManager @Inject constructor(
                 var lastBytes = resolvedFile?.local?.downloadedSize ?: item.downloadedBytes
                 var lastTime = System.currentTimeMillis()
                 var currentSpeed = 0L
+                var isCompleted = false
 
-                telegramClient.fileUpdates.collect { update ->
-                    if (update.file.id != targetFileId) return@collect
+                telegramClient.fileUpdates
+                    .takeWhile { !isCompleted }
+                    .collect { update ->
+                        if (isCompleted || update.file.id != targetFileId) return@collect
 
-                    val file = update.file
-                    val downloadedBytes = file.local.downloadedSize
-                    val totalBytes = if (file.size > 0L) file.size else file.expectedSize
-                    val remoteUniqueId = file.remote?.uniqueId?.takeIf { it.isNotBlank() } ?: item.fileUniqueId
-                    val newRemoteId = file.remote?.id?.takeIf { it.isNotBlank() } ?: item.remoteFileId
+                        val file = update.file
+                        val downloadedBytes = file.local.downloadedSize
+                        val totalBytes = if (file.size > 0L) file.size else file.expectedSize
+                        val remoteUniqueId = file.remote?.uniqueId?.takeIf { it.isNotBlank() } ?: item.fileUniqueId
+                        val newRemoteId = file.remote?.id?.takeIf { it.isNotBlank() } ?: item.remoteFileId
 
-                    if (file.local.isDownloadingCompleted) {
-                        Log.i(TAG, "Download completed for ${item.title}. Relocating file to isolated downloads directory...")
-                        val srcFile = File(file.local.path)
-                        val safeFileName = if (remoteUniqueId != null) "${remoteUniqueId}.mp4" else "${item.id}_${item.fileId}.mp4"
-                        val destFile = File(downloadsDir, safeFileName)
+                        if (file.local.isDownloadingCompleted) {
+                            isCompleted = true
+                            Log.i(TAG, "Download completed for ${item.title}. Relocating file to isolated downloads directory...")
+                            val srcFile = File(file.local.path)
+                            val safeFileName = if (remoteUniqueId != null) "${remoteUniqueId}.mp4" else "${item.id}_${item.fileId}.mp4"
+                            val destFile = File(downloadsDir, safeFileName)
 
-                        try {
-                            if (srcFile.exists() && srcFile.length() > 0L) {
-                                var moved = false
-                                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                                    try {
-                                        java.nio.file.Files.move(
-                                            srcFile.toPath(),
-                                            destFile.toPath(),
-                                            java.nio.file.StandardCopyOption.ATOMIC_MOVE,
-                                            java.nio.file.StandardCopyOption.REPLACE_EXISTING
-                                        )
-                                        moved = true
-                                    } catch (_: Throwable) {
-                                        moved = false
+                            // Proteção contra falso positivo de conclusão imediata em arquivos minúsculos / avatares
+                            val srcLength = srcFile.takeIf { it.exists() }?.length() ?: 0L
+                            val destLength = destFile.takeIf { it.exists() }?.length() ?: 0L
+                            val maxFoundLength = maxOf(srcLength, destLength)
+                            if (maxFoundLength < 500_000L && (totalBytes > 1_000_000L || item.totalBytes > 1_000_000L)) {
+                                Log.w(TAG, "Ignorando falso evento de conclusão para ${item.title}: tamanho encontrado $maxFoundLength B muito menor que o esperado ($totalBytes B).")
+                                isCompleted = false
+                                return@collect
+                            }
+
+                            try {
+                                if (srcFile.exists() && srcFile.length() > 0L) {
+                                    var moved = false
+                                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                                        try {
+                                            java.nio.file.Files.move(
+                                                srcFile.toPath(),
+                                                destFile.toPath(),
+                                                java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                                                java.nio.file.StandardCopyOption.REPLACE_EXISTING
+                                            )
+                                            moved = true
+                                        } catch (_: Throwable) {
+                                            moved = false
+                                        }
+                                    }
+                                    if (!moved) {
+                                        moved = srcFile.renameTo(destFile)
+                                    }
+                                    if (!moved && srcFile.exists()) {
+                                        srcFile.copyTo(destFile, overwrite = true)
+                                        srcFile.delete()
                                     }
                                 }
-                                if (!moved) {
-                                    moved = srcFile.renameTo(destFile)
+                                // SEGURANÇA MÁXIMA: Só avisa o TDLib para apagar o arquivo do banco temporário
+                                // se o arquivo de destino no disco existir e tiver conteúdo de verdade (> 0 bytes)
+                                if (destFile.exists() && destFile.length() > 0L) {
+                                    telegramClient.deleteFile(file.id)
+                                } else {
+                                    Log.e(TAG, "Falha na realocação: arquivo destino não tem bytes válidos (${destFile.length()}B). Mantendo TDLib intacto.")
                                 }
-                                if (!moved && srcFile.exists()) {
-                                    srcFile.copyTo(destFile, overwrite = true)
-                                    srcFile.delete()
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Error moving downloaded file", e)
+                            }
+
+                            val actualFinalSize = destFile.takeIf { it.exists() }?.length() ?: 0L
+                            val isFinalValid = actualFinalSize > 0L && (totalBytes <= 0L || actualFinalSize >= (totalBytes * 0.99).toLong())
+
+                            if (!isFinalValid) {
+                                Log.e(TAG, "Download final inválido para ${item.title} (size=$actualFinalSize, esperado=$totalBytes). Marcando como FAILED.")
+                                mutex.withLock {
+                                    val list = _downloads.value.map {
+                                        if (it.id == item.id) it.copy(
+                                            status = DownloadStatus.FAILED,
+                                            errorMessage = "Arquivo corrompido ou vazio na gravação",
+                                            downloadedBytes = 0L,
+                                            speedBytesPerSec = 0L
+                                        ) else it
+                                    }
+                                    _downloads.value = list
+                                    saveToDisk(list)
                                 }
+                                activeDownloadId = null
+                                notificationHelper.dismissProgress()
+                                notificationHelper.showFailed(item, "Arquivo final vazio ou corrompido")
+                                processNextInQueue()
+                                return@collect
                             }
-                            // SEGURANÇA MÁXIMA: Só avisa o TDLib para apagar o arquivo do banco temporário
-                            // se o arquivo de destino no disco existir e tiver conteúdo de verdade (> 0 bytes)
-                            if (destFile.exists() && destFile.length() > 0L) {
-                                telegramClient.deleteFile(file.id)
-                            } else {
-                                Log.e(TAG, "Falha na realocação: arquivo destino não tem bytes válidos (${destFile.length()}B). Mantendo TDLib intacto.")
-                            }
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Error moving downloaded file", e)
-                        }
 
-                        val actualFinalSize = destFile.takeIf { it.exists() }?.length() ?: 0L
-                        val isFinalValid = actualFinalSize > 0L && (totalBytes <= 0L || actualFinalSize >= (totalBytes * 0.99).toLong())
+                            val finalPath = destFile.absolutePath
+                            var completedItem: DownloadItem? = null
 
-                        if (!isFinalValid) {
-                            Log.e(TAG, "Download final inválido para ${item.title} (size=$actualFinalSize, esperado=$totalBytes). Marcando como FAILED.")
                             mutex.withLock {
                                 val list = _downloads.value.map {
-                                    if (it.id == item.id) it.copy(
-                                        status = DownloadStatus.FAILED,
-                                        errorMessage = "Arquivo corrompido ou vazio na gravação",
-                                        downloadedBytes = 0L,
-                                        speedBytesPerSec = 0L
-                                    ) else it
+                                    if (it.id == item.id) {
+                                        val comp = it.copy(
+                                            status = DownloadStatus.COMPLETED,
+                                            fileUniqueId = remoteUniqueId,
+                                            remoteFileId = newRemoteId,
+                                            downloadedBytes = actualFinalSize,
+                                            totalBytes = actualFinalSize,
+                                            localPath = finalPath,
+                                            speedBytesPerSec = 0L
+                                        )
+                                        completedItem = comp
+                                        comp
+                                    } else it
                                 }
                                 _downloads.value = list
                                 saveToDisk(list)
                             }
+
                             activeDownloadId = null
                             notificationHelper.dismissProgress()
-                            notificationHelper.showFailed(item, "Arquivo final vazio ou corrompido")
+                            completedItem?.let { notificationHelper.showCompleted(it) }
+                            if (_downloads.value.none { it.status == DownloadStatus.QUEUED }) {
+                                DownloadService.stop(context)
+                            }
                             processNextInQueue()
                             return@collect
                         }
 
-                        val finalPath = destFile.absolutePath
-                        var completedItem: DownloadItem? = null
-
-                        mutex.withLock {
-                            val list = _downloads.value.map {
-                                if (it.id == item.id) {
-                                    val comp = it.copy(
-                                        status = DownloadStatus.COMPLETED,
-                                        fileUniqueId = remoteUniqueId,
-                                        remoteFileId = newRemoteId,
-                                        downloadedBytes = actualFinalSize,
-                                        totalBytes = actualFinalSize,
-                                        localPath = finalPath,
-                                        speedBytesPerSec = 0L
-                                    )
-                                    completedItem = comp
-                                    comp
-                                } else it
+                        // Progress update (throttled to calculate accurate speed and update notification & UI state)
+                        if (isCompleted) return@collect
+                        val now = System.currentTimeMillis()
+                        val timeDelta = now - lastTime
+                        if (lastEmitTime == 0L || (timeDelta >= 500L && now - lastEmitTime >= 300L)) {
+                            val bytesDelta = (downloadedBytes - lastBytes).coerceAtLeast(0L)
+                            if (timeDelta > 0 && lastEmitTime > 0L) {
+                                currentSpeed = (bytesDelta * 1000L) / timeDelta
                             }
-                            _downloads.value = list
-                            saveToDisk(list)
-                        }
+                            lastBytes = downloadedBytes
+                            lastTime = now
+                            lastEmitTime = now
 
-                        activeDownloadId = null
-                        notificationHelper.dismissProgress()
-                        completedItem?.let { notificationHelper.showCompleted(it) }
-                        if (_downloads.value.none { it.status == DownloadStatus.QUEUED }) {
-                            DownloadService.stop(context)
+                            val currentItem = item.copy(
+                                fileId = targetFileId,
+                                remoteFileId = newRemoteId,
+                                fileUniqueId = remoteUniqueId,
+                                status = DownloadStatus.DOWNLOADING,
+                                downloadedBytes = downloadedBytes,
+                                totalBytes = if (totalBytes > 0L) totalBytes else item.totalBytes,
+                                speedBytesPerSec = currentSpeed
+                            )
+
+                            _downloads.value = _downloads.value.map {
+                                if (it.id == item.id && it.status != DownloadStatus.COMPLETED) currentItem else it
+                            }
+                            notificationHelper.updateProgress(currentItem)
                         }
-                        processNextInQueue()
-                        return@collect
                     }
-
-                    // Progress update (throttled to calculate accurate speed and update notification & UI state)
-                    val now = System.currentTimeMillis()
-                    val timeDelta = now - lastTime
-                    if (lastEmitTime == 0L || (timeDelta >= 500L && now - lastEmitTime >= 300L)) {
-                        val bytesDelta = (downloadedBytes - lastBytes).coerceAtLeast(0L)
-                        if (timeDelta > 0 && lastEmitTime > 0L) {
-                            currentSpeed = (bytesDelta * 1000L) / timeDelta
-                        }
-                        lastBytes = downloadedBytes
-                        lastTime = now
-                        lastEmitTime = now
-
-                        val currentItem = item.copy(
-                            fileId = targetFileId,
-                            remoteFileId = newRemoteId,
-                            fileUniqueId = remoteUniqueId,
-                            status = DownloadStatus.DOWNLOADING,
-                            downloadedBytes = downloadedBytes,
-                            totalBytes = if (totalBytes > 0L) totalBytes else item.totalBytes,
-                            speedBytesPerSec = currentSpeed
-                        )
-
-                        _downloads.value = _downloads.value.map {
-                            if (it.id == item.id) currentItem else it
-                        }
-                        notificationHelper.updateProgress(currentItem)
-                    }
-                }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 activeDownloadId = null
                 notificationHelper.dismissProgress()

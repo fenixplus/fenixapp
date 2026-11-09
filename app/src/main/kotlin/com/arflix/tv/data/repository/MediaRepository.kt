@@ -39,10 +39,13 @@ import com.arflix.tv.util.Constants
 import com.arflix.tv.util.ContentRating
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -104,7 +107,9 @@ class MediaRepository @Inject constructor(
 
     data class CategoryPageResult(
         val items: List<MediaItem>,
-        val hasMore: Boolean
+        val hasMore: Boolean,
+        val nextOffset: Int? = null,
+        val totalCount: Int? = null
     )
 
     private val apiKey = Constants.TMDB_API_KEY
@@ -262,13 +267,14 @@ class MediaRepository @Inject constructor(
         // instead of clamping at the default 72/96/120 ceiling. FRANCHISE and
         // other fixed groups keep the small cap.
         val unlimitedGroup = catalog.collectionGroup == CollectionGroupKind.SERVICE ||
-            catalog.collectionGroup == CollectionGroupKind.GENRE
+            catalog.collectionGroup == CollectionGroupKind.GENRE ||
+            catalog.collectionRailKey != null
 
         // Resolve all sources in parallel so a slow/failed source never blocks the
         // others — this alone fixes "empty" genre collections where one source 404s.
         val sourceBudgets = catalog.collectionSources.map { source ->
             if (unlimitedGroup) {
-                (targetCount + 20).coerceAtLeast(40)
+                ((targetCount + 19) / 20) * 20
             } else when (source.kind) {
                 CollectionSourceKind.ADDON_CATALOG -> (targetCount + 12).coerceAtLeast(24).coerceAtMost(120)
                 CollectionSourceKind.MDBLIST_PUBLIC -> (targetCount + 8).coerceAtLeast(24).coerceAtMost(96)
@@ -2273,49 +2279,104 @@ class MediaRepository @Inject constructor(
     suspend fun loadCollectionCatalogPage(
         catalog: CatalogConfig,
         offset: Int,
-        limit: Int
+        limit: Int,
+        mediaType: MediaType? = null,
+        refFilter: ((MediaType, Int) -> Boolean)? = null,
+        onItemsAvailable: ((List<MediaItem>) -> Unit)? = null
     ): CategoryPageResult = coroutineScope {
         if (catalog.collectionSources.isEmpty() || limit <= 0 || offset < 0) {
             return@coroutineScope CategoryPageResult(emptyList(), hasMore = false)
         }
+        val requestLanguage = contentLanguage ?: "pt-BR"
 
-        val refs = resolveCollectionCatalogRefs(
+        var currentRequiredCount = (offset + limit).coerceAtLeast(limit)
+        var refs = resolveCollectionCatalogRefs(
             catalog = catalog,
-            requiredCount = (offset + limit).coerceAtLeast(limit)
+            requiredCount = currentRequiredCount
         )
-        if (refs.isEmpty()) return@coroutineScope CategoryPageResult(emptyList(), hasMore = false)
+        if (mediaType != null) {
+            refs = refs.filter { it.first == mediaType }
+        }
+        var filteredRefs = if (refFilter != null) refs.filter { refFilter(it.first, it.second) } else refs
 
-        val pageRefs = refs.drop(offset).take(limit)
+        // If the bot filter reduces the number of items below what's needed for (offset + limit),
+        // expand discovery so we return the requested quantity of valid bot items!
+        var attempts = 0
+        while (filteredRefs.size < (offset + limit) && attempts < 6 && currentRequiredCount < 300) {
+            attempts++
+            currentRequiredCount += 30
+            val moreRefs = resolveCollectionCatalogRefs(catalog, currentRequiredCount)
+            val filteredMore = if (mediaType != null) moreRefs.filter { it.first == mediaType } else moreRefs
+            val newFiltered = if (refFilter != null) filteredMore.filter { refFilter(it.first, it.second) } else filteredMore
+            if (newFiltered.size <= filteredRefs.size) {
+                break
+            }
+            filteredRefs = newFiltered
+        }
+
+        if (filteredRefs.isEmpty()) return@coroutineScope CategoryPageResult(emptyList(), hasMore = false)
+
+        val pageRefs = filteredRefs.drop(offset).take(limit)
         val itemsByRef = LinkedHashMap<Pair<MediaType, Int>, MediaItem>()
         val missingRefs = mutableListOf<Pair<MediaType, Int>>()
+        val finishedRefs = mutableSetOf<Pair<MediaType, Int>>()
+        val progressMutex = Mutex()
+        var publishedCount = 0
+
+        fun publishAvailable() {
+            val available = pageRefs.takeWhile { it in finishedRefs }.mapNotNull { itemsByRef[it] }
+            if (available.size > publishedCount) {
+                publishedCount = available.size
+                onItemsAvailable?.invoke(available)
+            }
+        }
+
         pageRefs.forEach { (type, tmdbId) ->
             val cachedItem = getCachedItem(type, tmdbId)
             if (cachedItem != null) {
                 itemsByRef[type to tmdbId] = cachedItem
+                finishedRefs += type to tmdbId
             } else {
                 missingRefs += (type to tmdbId)
             }
         }
-        val semaphore = Semaphore(2)
-        val jobs = missingRefs.map { (type, tmdbId) ->
+        publishAvailable()
+
+        val semaphore = Semaphore(6)
+        missingRefs.map { (type, tmdbId) ->
             async {
-                semaphore.withPermit {
-                    val item = runCatching {
+                val item = semaphore.withPermit {
+                    try {
                         when (type) {
-                            MediaType.MOVIE -> getMovieDetails(tmdbId)
-                            MediaType.TV -> getTvDetails(tmdbId)
+                            MediaType.MOVIE -> tmdbApi.getMovieDetails(tmdbId, apiKey, language = requestLanguage)
+                                .toMediaItem(requestLanguage)
+                            MediaType.TV -> tmdbApi.getTvDetails(tmdbId, apiKey, language = requestLanguage)
+                                .toMediaItem(requestLanguage)
                         }
-                    }.getOrNull()
-                    if (item != null) {
-                        itemsByRef[type to tmdbId] = item
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                        null
                     }
                 }
+                progressMutex.withLock {
+                    if (item != null) {
+                        cacheItem(item)
+                        itemsByRef[type to tmdbId] = item
+                    }
+                    finishedRefs += type to tmdbId
+                    publishAvailable()
+                }
             }
-        }
-        jobs.forEach { it.await() }
+        }.awaitAll()
+
         val items = pageRefs.mapNotNull { itemsByRef[it] }
-        if (items.isNotEmpty()) cacheItems(items)
-        CategoryPageResult(items = items, hasMore = offset + pageRefs.size < refs.size)
+        val hasMore = offset + pageRefs.size < filteredRefs.size
+        CategoryPageResult(
+            items = items,
+            hasMore = hasMore,
+            nextOffset = offset + pageRefs.size
+        )
     }
 
     private suspend fun resolveCollectionSourceRefs(

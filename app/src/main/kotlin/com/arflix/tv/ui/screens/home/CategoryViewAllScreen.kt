@@ -133,7 +133,7 @@ internal fun CategoryViewAllContent(
         val target = if (lastFocusedIndex >= 0) {
             lastFocusedIndex.coerceIn(0, latestItemCount - 1)
         } else {
-            (latestItemCount - 1).coerceAtLeast(0)
+            minOf(35, (latestItemCount - 1).coerceAtLeast(0))
         }
         gridState.scrollToItem(target)
         if (!isMobile) {
@@ -143,14 +143,19 @@ internal fun CategoryViewAllContent(
     LaunchedEffect(categoryId, items.isNotEmpty()) {
         if (!initialPositionRestored && items.isNotEmpty()) {
             delay(150)
-            val target = (items.size - 1).coerceAtLeast(0)
+            // Continuidade com a Home: o carrossel exibe até 35 itens (índices 0..34).
+            // O card "Ver tudo" fica na posição 35. Portanto, continuamos no item 35
+            // (ou no último item disponível se houver menos de 35 itens).
+            val target = minOf(35, items.lastIndex).coerceAtLeast(0)
             lastFocusedIndex = target
             gridState.scrollToItem(target)
             if (!isMobile) {
                 pendingFocusIndex = target
             }
             initialPositionRestored = true
-            onNearEnd()
+            if (target >= items.size - 10) {
+                onNearEnd()
+            }
         }
     }
     DisposableEffect(lifecycleOwner, categoryId, isMobile) {

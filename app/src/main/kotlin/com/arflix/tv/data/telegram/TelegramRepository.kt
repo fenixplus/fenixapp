@@ -350,7 +350,7 @@ class TelegramRepository @Inject constructor(
         val dir = File(context.filesDir, "tdlib_files")
         if (dir.exists()) {
             val candidateFiles = dir.walkBottomUp()
-                .filter { it.isFile }
+                .filter { it.isFile && !it.name.startsWith(".") && !it.name.endsWith(".json", ignoreCase = true) }
                 .sortedBy { it.lastModified() } // Mais antigos primeiro (LRU real)
                 .toList()
 

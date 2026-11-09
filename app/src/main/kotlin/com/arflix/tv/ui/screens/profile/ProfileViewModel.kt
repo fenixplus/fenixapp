@@ -60,12 +60,13 @@ data class ProfileUiState(
     val pendingProfileForPin: Profile? = null,
     val pinContext: String = "", // "select", "edit", or "delete"
     val pinError: String = "", // Error message for wrong PIN
-    val isCatalogSyncing: Boolean = false
+    val isCatalogSyncing: Boolean = false,
+    val isOffline: Boolean = false
 )
 
 internal fun ProfileUiState.canFinishSelection(targetProfileId: String?): Boolean =
     targetProfileId != null && activeProfile?.id == targetProfileId &&
-        !isSwitchingProfile && !isManageMode && !showPinDialog && !isCatalogSyncing
+        !isSwitchingProfile && !isManageMode && !showPinDialog && (!isCatalogSyncing || isOffline)
 
 @HiltViewModel
 class ProfileViewModel @Inject constructor(
@@ -79,7 +80,8 @@ class ProfileViewModel @Inject constructor(
     private val iptvRepository: IptvRepository,
     private val profileAvatarImageManager: ProfileAvatarImageManager,
     private val cloudSyncRepository: CloudSyncRepository,
-    private val fenixRepository: com.arflix.tv.data.telegram.FenixRepository
+    private val fenixRepository: com.arflix.tv.data.telegram.FenixRepository,
+    private val networkMonitor: com.arflix.tv.network.NetworkMonitor
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(ProfileUiState())
@@ -91,6 +93,16 @@ class ProfileViewModel @Inject constructor(
         observeProfiles()
         restoreCloudProfilesForFreshLogin()
         observeCatalogSync()
+        observeNetworkState()
+    }
+
+    private fun observeNetworkState() {
+        _uiState.value = _uiState.value.copy(isOffline = !networkMonitor.isConnected)
+        viewModelScope.launch {
+            networkMonitor.isConnectedFlow.collect { connected ->
+                _uiState.value = _uiState.value.copy(isOffline = !connected)
+            }
+        }
     }
 
     private fun observeCatalogSync() {
@@ -248,11 +260,16 @@ class ProfileViewModel @Inject constructor(
                     }
                 }
 
-                _uiState.value = _uiState.value.copy(activeProfile = profile)
+                _uiState.value = _uiState.value.copy(
+                    activeProfile = profile,
+                    isOffline = !networkMonitor.isConnected
+                )
 
-                // Sincroniza/verifica o catálogo Fenix antes de concluir a troca de perfil
-                withContext(Dispatchers.IO) {
-                    runCatching { fenixRepository.syncCatalog() }
+                // Sincroniza/verifica o catálogo Fenix antes de concluir a troca de perfil apenas se online
+                if (networkMonitor.isConnected) {
+                    withContext(Dispatchers.IO) {
+                        runCatching { fenixRepository.syncCatalog() }
+                    }
                 }
 
                 viewModelScope.launch(Dispatchers.IO) {
