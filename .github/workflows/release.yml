@@ -75,6 +75,7 @@ jobs:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
           TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
           TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+          GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4096m -Dorg.gradle.workers.max=2"
         run: ./gradlew :app:assembleSideloadRelease --no-daemon --stacktrace
 
       - name: Prepare Artifacts & Checksums

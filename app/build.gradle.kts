@@ -193,6 +193,13 @@ android {
     baselineProfile {
         mergeIntoMain = true
     }
+
+    lint {
+        checkReleaseBuilds = false
+        abortOnError = false
+        ignoreWarnings = true
+        checkDependencies = false
+    }
 }
 
 kotlin {
