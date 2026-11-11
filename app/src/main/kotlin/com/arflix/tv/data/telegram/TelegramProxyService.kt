@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.arflix.tv.MainActivity
@@ -23,7 +24,10 @@ class TelegramProxyService : Service() {
     @Inject
     lateinit var proxy: TelegramStreamingProxy
 
+    private val wakeHelper by lazy { com.arflix.tv.util.PlaybackWakeHelper(this, "ExternalProxy") }
+
     companion object {
+        private const val TAG = "TelegramProxyService"
         private const val CHANNEL_ID = "telegram_proxy_channel"
         private const val NOTIFICATION_ID = 1001
         
@@ -33,12 +37,26 @@ class TelegramProxyService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    override fun onCreate() {
+        super.onCreate()
+        proxy.onIdleTimeout = {
+            Log.i(TAG, "External player idle timeout triggered. Stopping proxy service.")
+            stopProxy()
+        }
+    }
+
+    override fun onDestroy() {
+        proxy.onIdleTimeout = null
+        wakeHelper.release()
+        super.onDestroy()
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> startProxy()
             ACTION_STOP -> stopProxy()
         }
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     private fun startProxy() {
@@ -63,12 +81,22 @@ class TelegramProxyService : Service() {
         if (!proxy.isRunning()) {
             proxy.start()
         }
+        wakeHelper.acquire()
     }
 
     private fun stopProxy() {
+        wakeHelper.release()
         proxy.stop()
-        stopForeground(true)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } else {
+            @Suppress("DEPRECATION")
+            stopForeground(true)
+        }
+        val manager = getSystemService(NotificationManager::class.java)
+        manager?.cancel(NOTIFICATION_ID)
         stopSelf()
+        Log.i(TAG, "TelegramProxyService stopped and notification removed")
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
@@ -83,10 +111,11 @@ class TelegramProxyService : Service() {
                 "Telegram Streaming Proxy",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Mantém o proxy de vídeo do Telegram ativo"
+                description = "Mantém o proxy de vídeo do Telegram ativo para player externo"
+                setShowBadge(true)
             }
             val manager = getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(serviceChannel)
+            manager?.createNotificationChannel(serviceChannel)
         }
     }
 
@@ -99,13 +128,24 @@ class TelegramProxyService : Service() {
             PendingIntent.FLAG_IMMUTABLE
         )
 
+        val stopIntent = Intent(this, TelegramProxyService::class.java).apply {
+            action = ACTION_STOP
+        }
+        val stopPendingIntent = PendingIntent.getService(
+            this,
+            1,
+            stopIntent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Fênix +")
-            .setContentText("Transmitindo vídeo do Telegram...")
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentText("Reproduzindo em Player Externo")
+            .setSmallIcon(R.drawable.ic_notification_external_player)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
+            .addAction(0, "Parar", stopPendingIntent)
             .build()
     }
 }

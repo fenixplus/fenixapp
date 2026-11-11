@@ -224,23 +224,32 @@ fun DetailsScreen(
     val isRtlLayoutDirection = androidx.compose.ui.platform.LocalLayoutDirection.current == androidx.compose.ui.unit.LayoutDirection.Rtl
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val isMobile = LocalDeviceType.current.isTouchDevice()
+
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { _ -> }
 
-    fun requestNotificationPermissionAndLaunch(context: Context, stream: StreamSource) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+    var pendingNotificationRationale by remember { mutableStateOf<com.arflix.tv.ui.components.NotificationRationaleType?>(null) }
+    var pendingActionAfterRationale by remember { mutableStateOf<(() -> Unit)?>(null) }
+
+    fun checkAndRequestNotificationPermission(
+        type: com.arflix.tv.ui.components.NotificationRationaleType,
+        onGrantedOrBypassed: () -> Unit
+    ) {
+        if (isMobile && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val status = ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS)
             if (status != PackageManager.PERMISSION_GRANTED) {
-                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                pendingNotificationRationale = type
+                pendingActionAfterRationale = onGrantedOrBypassed
+                return
             }
         }
-        viewModel.launchExternalPlayer(context, stream)
+        onGrantedOrBypassed()
     }
     val usePosterCards = rememberCatalogueRowLayoutMode("details:similar") == CardLayoutMode.POSTER
-    val context = LocalContext.current
-    val lifecycleOwner = LocalLifecycleOwner.current
-    val isMobile = LocalDeviceType.current.isTouchDevice()
 
     // Start on buttons for both TV and movies (buttons are now shown for both)
     var focusedSection by remember { mutableStateOf(FocusSection.BUTTONS) }
@@ -1179,7 +1188,9 @@ fun DetailsScreen(
                 viewModel.prewarmStreamsAround(stream, uiState.streams)
             },
             onExternalPlayer = { stream ->
-                requestNotificationPermissionAndLaunch(context, stream)
+                checkAndRequestNotificationPermission(com.arflix.tv.ui.components.NotificationRationaleType.EXTERNAL_PLAYER) {
+                    viewModel.launchExternalPlayer(context, stream)
+                }
             },
             onSelect = { stream ->
                 if (isPendingDebridStream(stream)) {
@@ -1237,7 +1248,9 @@ fun DetailsScreen(
                 val targetEp = uiState.episodes.firstOrNull {
                     it.seasonNumber == selectedStreamSeason && it.episodeNumber == selectedStreamEpisode
                 } ?: uiState.episodes.getOrNull(episodeIndex)
-                viewModel.downloadStream(stream, targetEp)
+                checkAndRequestNotificationPermission(com.arflix.tv.ui.components.NotificationRationaleType.DOWNLOAD) {
+                    viewModel.downloadStream(stream, targetEp)
+                }
             } else null,
             onClose = { showStreamSelector = false }
         )
@@ -1313,6 +1326,26 @@ fun DetailsScreen(
                 isVisible = true,
                 durationMs = if (uiState.toastType == com.arflix.tv.ui.screens.details.ToastType.ERROR) 8000 else 4000,
                 onDismiss = { viewModel.dismissToast() }
+            )
+        }
+
+        pendingNotificationRationale?.let { rationaleType ->
+            com.arflix.tv.ui.components.NotificationRationaleDialog(
+                type = rationaleType,
+                accentColor = com.arflix.tv.ui.skin.LocalAccentColorOverride.current ?: Color(0xFFE50914),
+                onConfirmEnable = {
+                    pendingNotificationRationale = null
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    }
+                    pendingActionAfterRationale?.invoke()
+                    pendingActionAfterRationale = null
+                },
+                onDismiss = {
+                    pendingNotificationRationale = null
+                    pendingActionAfterRationale?.invoke()
+                    pendingActionAfterRationale = null
+                }
             )
         }
     }

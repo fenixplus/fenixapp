@@ -66,7 +66,6 @@ class TdByteWindow(
     @Volatile
     private var downloadedTotal = 0L
 
-    private var currentRanges = listOf<LowStorageWindow.Range>()
     private val rollLock = Mutex()
 
     private var updates: Job? = null
@@ -87,24 +86,16 @@ class TdByteWindow(
         }
     }
 
-    private class Playhead {
-        @Volatile
-        var mainAt = -1L
-
-        @Volatile
-        var probe = Window.EMPTY
-    }
-
     fun watch(fileId: Int, remoteId: String? = null) {
         shut = false
         val isSameFile = this.fileId == fileId && fileId > 0
         this.fileId = fileId
         this.remoteId = remoteId
         if (!isSameFile) {
-            currentRanges = emptyList()
-            playhead = Playhead().apply { mainAt = 0L }
-        } else if (playhead == null) {
-            playhead = Playhead().apply { mainAt = 0L }
+            playhead?.let(::letGo)
+            playhead = if (fileId > 0) takePlayhead(fileId) else null
+        } else if (playhead == null && fileId > 0) {
+            playhead = takePlayhead(fileId)
         }
         stopWatching()
         if (fileId > 0) {
@@ -231,6 +222,8 @@ class TdByteWindow(
         window = Window.EMPTY
         side = Window.EMPTY
         completed = false
+        playhead?.let(::letGo)
+        playhead = null
     }
 
     private fun absorb(file: TdApi.File) {
@@ -400,7 +393,8 @@ class TdByteWindow(
 
     private suspend fun rollIfDue(target: Long) = rollLock.withLock {
         if (isOfflineDownload()) return@withLock
-        if (!LowStorageWindow.shouldRoll(target, currentRanges, size)) return@withLock
+        val ranges = fileRanges[fileId] ?: emptyList()
+        if (!LowStorageWindow.shouldRoll(target, ranges, size)) return@withLock
         val from = LowStorageWindow.rollStart(target)
         Log.i(TAG, "Low storage: rolling file $fileId at $target from $from")
         requestDownloadFrom(from, roll = true)
@@ -408,7 +402,8 @@ class TdByteWindow(
 
     private fun shouldRollDue(target: Long): Boolean {
         if (isOfflineDownload()) return false
-        return LowStorageWindow.shouldRoll(target, currentRanges, size)
+        val ranges = fileRanges[fileId] ?: emptyList()
+        return LowStorageWindow.shouldRoll(target, ranges, size)
     }
 
     suspend fun requestDownloadFrom(offset: Long, roll: Boolean = false) {
@@ -418,25 +413,48 @@ class TdByteWindow(
             return
         }
 
-        val bounded = LowStorageWindow.plan(
-            ranges = currentRanges,
-            offset = offset,
-            size = size,
-            window = LowStorageWindow.WINDOW_BYTES,
-            roll = roll,
-        )
+        val mutex = downloadLocks.getOrPut(fileId) { Mutex() }
+        mutex.withLock {
+            val now = System.currentTimeMillis()
+            val lastOffset = lastRequestedOffsets[fileId] ?: -1L
+            val lastTime = lastRequestedTimes[fileId] ?: 0L
 
-        if (bounded.deleteFirst) {
-            deleteForLowStorage(offset)
+            // Se for o mesmo offset pedido há menos de 1000ms, ignora o re-pedido redundante
+            if (!roll && offset == lastOffset && (now - lastTime < 1_000L)) {
+                return@withLock
+            }
+
+            // Se for offset diferente pedido há menos de 250ms por outra thread,
+            // evita ping-pong catastrófico se a TDLib já estiver baixando
+            if (!roll && offset != lastOffset && (now - lastTime < 250L)) {
+                Log.w(TAG, "Deduplicating rapid download switch: ignoring offset=$offset because offset=$lastOffset was requested ${now - lastTime}ms ago")
+                return@withLock
+            }
+
+            val ranges = fileRanges[fileId] ?: emptyList()
+            val bounded = LowStorageWindow.plan(
+                ranges = ranges,
+                offset = offset,
+                size = size,
+                window = LowStorageWindow.WINDOW_BYTES,
+                roll = roll,
+            )
+
+            if (bounded.deleteFirst) {
+                deleteForLowStorage(offset)
+            }
+
+            Log.d(TAG, "Low storage: requesting download fileId=$fileId offset=$offset limit=${bounded.limit} roll=$roll deleteFirst=${bounded.deleteFirst}")
+            client.downloadFile(fileId = fileId, priority = 32, offset = offset, limit = bounded.limit, synchronous = false)
+
+            lastRequestedOffsets[fileId] = offset
+            lastRequestedTimes[fileId] = now
+            fileRanges[fileId] = bounded.ranges
+
+            if (bounded.deleteFirst) {
+                client.getFile(fileId)?.let(::absorb)
+            }
         }
-
-        Log.d(TAG, "Low storage: requesting download fileId=$fileId offset=$offset limit=${bounded.limit} roll=$roll deleteFirst=${bounded.deleteFirst}")
-        client.downloadFile(fileId = fileId, priority = 32, offset = offset, limit = bounded.limit, synchronous = false)
-
-        if (bounded.deleteFirst) {
-            client.getFile(fileId)?.let(::absorb)
-        }
-        currentRanges = bounded.ranges
     }
 
     suspend fun requestUnlessOnDisk(offset: Long) {
@@ -659,12 +677,49 @@ class TdByteWindow(
         const val STALL_TIMEOUT_MS = 40_000L
         private const val NUDGE_AFTER_MS = 3_000L
         private const val NUDGE_ELSEWHERE_BYTES = 2L * 1024L * 1024L
-        private const val POLL_INTERVAL_MS = 400L
+        private const val POLL_INTERVAL_MS = 600L
         private const val PROBE_BYTES = 2L * 1024L * 1024L
         private const val PROBE_ALIGN_BYTES = 1024L * 1024L
         private const val PROBE_READY_BYTES = 64L * 1024L
         private const val PROBE_NUDGE_MS = 2_000L
         private const val PROBE_GIVE_UP_MS = 8_000L
         private const val PROMOTE_MARGIN_BYTES = 256L * 1024L
+
+        private class Playhead {
+            @Volatile
+            var mainAt = -1L
+
+            @Volatile
+            var probe = Window.EMPTY
+
+            var open = 0
+            var closedAt = 0L
+        }
+
+        private val playheads = LinkedHashMap<Int, Playhead>()
+        private val fileRanges = java.util.concurrent.ConcurrentHashMap<Int, List<LowStorageWindow.Range>>()
+        private val downloadLocks = java.util.concurrent.ConcurrentHashMap<Int, Mutex>()
+        private val lastRequestedOffsets = java.util.concurrent.ConcurrentHashMap<Int, Long>()
+        private val lastRequestedTimes = java.util.concurrent.ConcurrentHashMap<Int, Long>()
+
+        private fun takePlayhead(fileId: Int): Playhead = synchronized(playheads) {
+            val ph = playheads.getOrPut(fileId) { Playhead() }
+            if (ph.open == 0 && System.currentTimeMillis() - ph.closedAt > 5_000L) {
+                ph.mainAt = -1L
+                ph.probe = Window.EMPTY
+            }
+            ph.open++
+            if (playheads.size > 16) {
+                playheads.entries.firstOrNull { it.value.open == 0 && it.key != fileId }?.let { playheads.remove(it.key) }
+            }
+            ph
+        }
+
+        private fun letGo(ph: Playhead) = synchronized(playheads) {
+            ph.open = (ph.open - 1).coerceAtLeast(0)
+            if (ph.open == 0) ph.closedAt = System.currentTimeMillis()
+        }
+
+        fun isStreaming(fileId: Int): Boolean = synchronized(playheads) { (playheads[fileId]?.open ?: 0) > 0 }
     }
 }

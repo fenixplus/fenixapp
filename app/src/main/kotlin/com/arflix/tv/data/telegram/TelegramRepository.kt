@@ -559,6 +559,8 @@ class TelegramRepository @Inject constructor(
 
     fun getProxyStreamUrl(fileId: Int): String = proxy.getUrl(fileId)
 
+    fun getLocalFileStreamUrl(file: java.io.File): String = proxy.getLocalUrl(file)
+
     fun getExcludedChatIds(): Flow<Set<Long>> =
         context.telegramDataStore.data.map { prefs ->
             prefs[KEY_EXCLUDED_CHATS]

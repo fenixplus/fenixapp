@@ -226,17 +226,58 @@ class DetailsViewModel @Inject constructor(
     fun launchExternalPlayer(context: Context, stream: StreamSource) {
         viewModelScope.launch {
             val rawUrl = stream.url ?: return@launch
+            val title = _uiState.value.item?.title ?: ""
+
             if (rawUrl.startsWith("tdfile://")) {
                 val uri = android.net.Uri.parse(rawUrl)
                 val fileId = uri.authority?.toIntOrNull() ?: uri.lastPathSegment?.toIntOrNull()
                 if (fileId != null && fileId > 0) {
                     val mimeType = uri.getQueryParameter("type") ?: "video/*"
-                    ExternalPlayer.handOver(
+
+                    // 1. Se o arquivo estiver 100% baixado no disco, abre direto via FileProvider
+                    val file = telegramClient.getFile(fileId)
+                    val local = file?.local
+                    val diskFile = local?.path?.takeIf { it.isNotBlank() }?.let { java.io.File(it) }
+
+                    if (local?.isDownloadingCompleted == true && diskFile?.exists() == true && diskFile.length() > 0) {
+                        ExternalPlayer.launchFile(
+                            context = context,
+                            file = diskFile,
+                            title = title,
+                            mimeType = mimeType,
+                            positionMs = 0L
+                        )
+                        return@launch
+                    }
+
+                    // 2. Se for streaming online, usamos o Proxy HTTP local (Ktor) com suporte a Range requests
+                    telegramRepository.startProxyService()
+                    withTimeoutOrNull(5000) {
+                        telegramRepository.isProxyReady.filter { it }.first()
+                    }
+                    val proxyUrl = telegramRepository.getProxyStreamUrl(fileId)
+
+                    ExternalPlayer.launchUrl(
                         context = context,
-                        client = telegramClient,
-                        fileId = fileId,
-                        title = _uiState.value.item?.title ?: "",
-                        mimeType = mimeType
+                        url = proxyUrl,
+                        title = title,
+                        mimeType = mimeType,
+                        positionMs = 0L
+                    )
+                    return@launch
+                }
+            }
+
+            // Arquivo local offline (ex: download finalizado file://...)
+            if (rawUrl.startsWith("file://")) {
+                val localFile = java.io.File(android.net.Uri.parse(rawUrl).path ?: "")
+                if (localFile.exists()) {
+                    ExternalPlayer.launchFile(
+                        context = context,
+                        file = localFile,
+                        title = title,
+                        mimeType = "video/*",
+                        positionMs = 0L
                     )
                     return@launch
                 }
@@ -249,22 +290,13 @@ class DetailsViewModel @Inject constructor(
             val resolvedStream = resolvedResult.getOrNull() ?: stream
             val url = resolvedStream.url ?: return@launch
 
-            // MODO 2: Same Task
-            val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(android.net.Uri.parse(url), "video/*")
-                putExtra("title", _uiState.value.item?.title ?: "")
-                putExtra("sticky_style", false)
-            }
-
-            try {
-                context.startActivity(intent)
-            } catch (e: Exception) {
-                try {
-                    context.startActivity(Intent.createChooser(intent, "Abrir com..."))
-                } catch (e2: Exception) {
-                    Log.e(TAG, "Failed to launch external player", e2)
-                }
-            }
+            ExternalPlayer.launchUrl(
+                context = context,
+                url = url,
+                title = title,
+                mimeType = "video/*",
+                positionMs = 0L
+            )
         }
     }
 

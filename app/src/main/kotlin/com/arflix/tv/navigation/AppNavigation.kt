@@ -659,6 +659,10 @@ fun AppNavigation(
                     type = NavType.StringType
                     defaultValue = ""
                 },
+                navArgument("preferredDescription") {
+                    type = NavType.StringType
+                    defaultValue = ""
+                },
                 navArgument("startPositionMs") {
                     type = NavType.LongType
                     defaultValue = -1L
@@ -666,6 +670,10 @@ fun AppNavigation(
                 navArgument("isLiveStream") {
                     type = NavType.BoolType
                     defaultValue = false
+                },
+                navArgument("fenixEpisodeId") {
+                    type = NavType.IntType
+                    defaultValue = -1
                 }
             )
         ) { backStackEntry ->

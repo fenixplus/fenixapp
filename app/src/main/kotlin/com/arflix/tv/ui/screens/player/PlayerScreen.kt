@@ -225,6 +225,8 @@ import android.Manifest
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import com.arflix.tv.ui.components.NotificationRationaleDialog
+import com.arflix.tv.ui.components.NotificationRationaleType
 
 private const val PIP_ACTION_REWIND = "com.arflix.tv.pip.REWIND"
 private const val PIP_ACTION_PLAY_PAUSE = "com.arflix.tv.pip.PLAY_PAUSE"
@@ -281,20 +283,35 @@ fun PlayerScreen(
         // Permission result ignored, service will try to start anyway
     }
 
-    fun requestNotificationPermissionAndLaunch(stream: StreamSource) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+    var pendingNotificationRationale by remember { mutableStateOf<NotificationRationaleType?>(null) }
+    var pendingActionAfterRationale by remember { mutableStateOf<(() -> Unit)?>(null) }
+    val deviceType = LocalDeviceType.current
+    val isMobile = remember(deviceType) { deviceType.isTouchDevice() }
+
+    fun checkAndRequestNotificationPermission(
+        type: NotificationRationaleType,
+        onGrantedOrBypassed: () -> Unit
+    ) {
+        if (isMobile && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val status = ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS)
             if (status != PackageManager.PERMISSION_GRANTED) {
-                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                pendingNotificationRationale = type
+                pendingActionAfterRationale = onGrantedOrBypassed
+                return
             }
         }
-        viewModel.launchExternalPlayer(context, stream)
+        onGrantedOrBypassed()
+    }
+
+    fun requestNotificationPermissionAndLaunch(stream: StreamSource) {
+        checkAndRequestNotificationPermission(NotificationRationaleType.EXTERNAL_PLAYER) {
+            viewModel.launchExternalPlayer(context, stream)
+        }
     }
     val latestUiState by rememberUpdatedState(uiState)
     val clockFormat = rememberPlayerClockFormat()
     val focusManager = LocalFocusManager.current
     val coroutineScope = rememberCoroutineScope()
-    val deviceType = LocalDeviceType.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val castManager = remember(context) {
         EntryPointAccessors.fromApplication(context.applicationContext, CastManagerEntryPoint::class.java).castManager()
@@ -378,6 +395,8 @@ fun PlayerScreen(
     var isControlScrubbing by remember { mutableStateOf(false) }
     var scrubPreviewPosition by remember { mutableLongStateOf(0L) }
     var controlsSeekJob by remember { mutableStateOf<Job?>(null) }
+    var lastLoadedCastUrl by remember { mutableStateOf<String?>(null) }
+    var lastLoadedCastEpisodeKey by remember { mutableStateOf<String?>(null) }
 
     // Volume state
     val audioManager = remember { context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: android.media.AudioManager::class.java.getDeclaredConstructor().newInstance() }
@@ -407,6 +426,11 @@ fun PlayerScreen(
     var focusedButton by remember { mutableIntStateOf(0) }
     var showSubtitleMenu by remember { mutableStateOf(false) }
     var showSourceMenu by remember { mutableStateOf(false) }
+    var isHandingOver by remember { mutableStateOf(false) }
+    val handlePlayNext: (Int, Int, String?, String?, String?, String?) -> Unit = { s, e, a, src, b, d ->
+        isHandingOver = true
+        onPlayNext(s, e, a, src, b, d)
+    }
     // Post-episode "Up Next" prompt (issue #86). Shown on STATE_ENDED for TV shows:
     // a 10-second countdown lets the user Cancel or immediately Continue. On timeout we
     // advance to the next episode. Gated on the existing autoPlayNext profile setting —
@@ -475,9 +499,28 @@ fun PlayerScreen(
         // first item, alongside the AI translation option — not as a global picker entry.
         groups.toList()
     }
-    // Audio tracks from ExoPlayer
+    // Audio tracks from ExoPlayer and Chromecast
     var audioTracks by remember { mutableStateOf<List<AudioTrackInfo>>(emptyList()) }
     var selectedAudioIndex by remember { mutableIntStateOf(0) }
+    val remoteCastAudioTracks by castManager.audioTracks.collectAsStateWithLifecycle()
+    val effectiveAudioTracks = remember(isCasting, audioTracks, remoteCastAudioTracks) {
+        if (isCasting && remoteCastAudioTracks.isNotEmpty()) {
+            remoteCastAudioTracks.mapIndexed { idx, remote ->
+                AudioTrackInfo(
+                    index = idx,
+                    groupIndex = 0,
+                    trackIndex = idx,
+                    language = remote.language,
+                    label = remote.name,
+                    channelCount = 2,
+                    sampleRate = 48000,
+                    codec = "audio/mp4a-latm"
+                )
+            }
+        } else {
+            audioTracks
+        }
+    }
     // Once the user picks an audio track for the current stream, stop auto-applying
     // the preferred-language selection so we don't fight their choice.
     var userPickedAudioForStream by remember { mutableStateOf(false) }
@@ -644,6 +687,13 @@ fun PlayerScreen(
 
     // Load media
     LaunchedEffect(mediaType, mediaId, seasonNumber, episodeNumber, imdbId, preferredAddonId, preferredSourceName, preferredBingeGroup, startPositionMs, isLiveStream) {
+        showNextEpisodePrompt = false
+        nextEpisodePromptDismissed = false
+        currentPosition = 0L
+        duration = 0L
+        progress = 0f
+        hasPlaybackStarted = false
+        firstVideoFrameRendered = false
         playbackIssueReported = false
         startupRecoverAttempted = false
         startupHardFailureReported = false
@@ -819,7 +869,11 @@ fun PlayerScreen(
         com.arflix.tv.player.telegram.TdDataSource.Factory(
             client = viewModel.telegramClient,
             isDownloadingCheck = { fileId -> viewModel.isDownloading(fileId) },
-            onFileOpened = { fileId -> viewModel.telegramRepository.onVideoLoading(fileId) }
+            onFileOpened = { fileId ->
+                if (castManager.castState.value !is CastManager.CastState.Casting) {
+                    viewModel.telegramRepository.onVideoLoading(fileId)
+                }
+            }
         )
     }
     // Composite factory: routes tdfile:// directly to TdDataSource (in-memory/NIO streaming from TDLib)
@@ -1163,7 +1217,9 @@ fun PlayerScreen(
                         val isDecoderFail = error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODING_FAILED ||
                             error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODER_INIT_FAILED ||
                             error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES ||
-                            error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED
+                            error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED ||
+                            error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED ||
+                            error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED
                         if (isDecoderFail && !preferExtensionDecoder) {
                             val pos = try { this@apply.currentPosition } catch (_: Exception) { -1L }
                             Log.i("PlayerDiagnostics", "🎬 auto-software-fallback: decoding failed (code=${error.errorCode}), triggering recreation for NextLib/FFmpeg software retry at ${pos}ms")
@@ -1587,39 +1643,76 @@ fun PlayerScreen(
     // Tracks the last confirmed position from the Chromecast so we can resume
     // ExoPlayer from it after disconnecting (remoteMediaClient is null by then).
     var lastCastPositionMs by remember { mutableStateOf(0L) }
+    var wasCasting by remember { mutableStateOf(false) }
 
     // When cast session starts: pause local ExoPlayer and hand the URL off to Chromecast.
     // When cast session ends: resume local ExoPlayer from the last reported cast position.
-    LaunchedEffect(castState) {
+    LaunchedEffect(castState, uiState.selectedStreamUrl, uiState.streamSelectionNonce) {
         when (castState) {
             is CastManager.CastState.Casting -> {
-                var url = uiState.selectedStreamUrl ?: return@LaunchedEffect
+                wasCasting = true
+                val rawUrl = uiState.selectedStreamUrl ?: return@LaunchedEffect
+                val streamMime = guessCastMimeType(rawUrl, uiState.selectedStream)
+                val castUrl = viewModel.resolveCastUrl(rawUrl, context, streamMime) ?: rawUrl
+                if (castUrl.isBlank()) return@LaunchedEffect
 
-                // Replace loopback address with device IP for external connections (Chromecast)
-                if (url.contains("127.0.0.1") || url.contains("localhost")) {
-                    DeviceIpAddress.get(context)?.let { ip ->
-                        url = url.replace("127.0.0.1", ip).replace("localhost", ip)
-                    }
-                }
+                val currentEpisodeKey = "${mediaType}_${mediaId}_${seasonNumber ?: 0}_${episodeNumber ?: 0}"
+                val isSameEpisode = castManager.currentMediaKey == currentEpisodeKey
+                val isNewUrl = lastLoadedCastUrl != castUrl
+                lastLoadedCastUrl = castUrl
 
-                val posMs = if (!playerReleased) exoPlayer.currentPosition else 0L
-                if (!playerReleased) exoPlayer.pause()
-                castManager.loadMedia(
-                    url = url,
-                    title = uiState.title,
-                    imageUrl = uiState.backdropUrl,
-                    mimeType = guessCastMimeType(url, uiState.selectedStream),
-                    positionMs = posMs
-                )
-            }
-            is CastManager.CastState.NotConnected -> {
-                // remoteMediaClient is null here — use the position tracked by the poll loop
-                val resumePos = lastCastPositionMs
-                if (!playerReleased && resumePos > 0L && !exoPlayer.isPlaying) {
-                    exoPlayer.seekTo(resumePos)
-                    exoPlayer.play()
+                val posMs = if (!isSameEpisode) {
+                    uiState.savedPosition ?: 0L
+                } else if (isNewUrl) {
+                    currentPosition.takeIf { it > 0L } ?: (uiState.savedPosition ?: 0L)
+                } else {
+                    if (lastCastPositionMs > 0L) lastCastPositionMs else (if (!playerReleased) exoPlayer.currentPosition else 0L)
                 }
                 lastCastPositionMs = 0L
+
+                val durMs = duration.takeIf { it > 0L }
+                    ?: (if (!playerReleased) exoPlayer.duration.takeIf { it > 0L && it != C.TIME_UNSET } else null)
+                    ?: 0L
+
+                if (!playerReleased) {
+                    exoPlayer.playWhenReady = false
+                    exoPlayer.stop()
+                }
+                currentPosition = posMs
+                duration = durMs
+                hasPlaybackStarted = false
+                showNextEpisodePrompt = false
+                nextEpisodePromptDismissed = false
+
+                castManager.loadMedia(
+                    url = castUrl,
+                    title = uiState.title,
+                    imageUrl = uiState.backdropUrl,
+                    mimeType = streamMime,
+                    positionMs = posMs,
+                    durationMs = durMs,
+                    mediaKey = currentEpisodeKey,
+                    dataSourceFactory = fileCapableDataSourceFactory,
+                    fileName = uiState.selectedStream?.rawLabel ?: uiState.title,
+                    fileSizeBytes = uiState.selectedStream?.sizeBytes,
+                    preferredAudioLanguage = uiState.preferredAudioLanguage
+                )
+                markPlaybackStarted("cast_load_issued")
+            }
+            is CastManager.CastState.NotConnected -> {
+                if (wasCasting) {
+                    wasCasting = false
+                    lastLoadedCastUrl = null
+                    lastLoadedCastEpisodeKey = null
+                    val resumePos = lastCastPositionMs.takeIf { it > 0L } ?: currentPosition
+                    lastCastPositionMs = 0L
+                    if (!playerReleased && uiState.selectedStreamUrl != null) {
+                        firstVideoFrameRendered = false
+                        hasPlaybackStarted = false
+                        autoFallbackPosition = resumePos
+                        playerCreationNonce++
+                    }
+                }
             }
             else -> Unit
         }
@@ -1633,12 +1726,48 @@ fun PlayerScreen(
             val pos = castManager.getApproximatePosition()
             if (pos > 0L) lastCastPositionMs = pos
             currentPosition = pos
+            viewModel.onPlaybackPosition(currentPosition)
             val remoteDuration = castManager.getApproximateDuration()
             if (remoteDuration > 0L) duration = remoteDuration
             progress = if (duration > 0L) {
                 (currentPosition.toFloat() / duration.toFloat()).coerceIn(0f, 1f)
             } else 0f
             isPlaying = castManager.isRemotePlaying()
+            isBuffering = castManager.isRemoteBuffering()
+            if (!hasPlaybackStarted && (isPlaying || pos > 0L || castManager.isRemoteBufferingOrPlaying())) {
+                markPlaybackStarted("cast_playback_active")
+            }
+
+            // Post-episode prompt for Cast:
+            val isCastNearEnd = duration > 60_000L && currentPosition > 30_000L && currentPosition >= duration - 5_000L && !castManager.isRemotePlaying() && !castManager.isRemoteBuffering()
+            val isCastPlaybackEnded = hasPlaybackStarted && duration > 60_000L && currentPosition > 30_000L && (castManager.isPlaybackEnded() || isCastNearEnd)
+
+            if (isCastPlaybackEnded &&
+                mediaType == MediaType.TV &&
+                !showNextEpisodePrompt &&
+                !nextEpisodePromptDismissed &&
+                !showSourceMenu &&
+                !showSubtitleMenu &&
+                uiState.error == null
+            ) {
+                if (seasonNumber != null && episodeNumber != null && uiState.autoPlayNext) {
+                    val nextEp = resolveNextEpisodeNumber(episodeNumber, uiState.seasonEpisodes)
+                    val hasNext = uiState.seasonEpisodes.isNotEmpty() &&
+                        nextEp != null &&
+                        uiState.seasonEpisodes.any { it.episodeNumber == nextEp }
+                    if (hasNext) {
+                        val selected = uiState.selectedStream
+                        pendingNextSeason = seasonNumber
+                        pendingNextEpisode = nextEp
+                        pendingNextAddonId = selected?.addonId?.takeIf { it.isNotBlank() }
+                        pendingNextSourceName = selected?.source?.takeIf { it.isNotBlank() }
+                        pendingNextBingeGroup = selected?.behaviorHints?.bingeGroup?.takeIf { it.isNotBlank() }
+                        pendingNextDescription = selected?.description?.takeIf { it.isNotBlank() }
+                        nextEpisodePromptButton = 0
+                        showNextEpisodePrompt = true
+                    }
+                }
+            }
             delay(500)
         }
     }
@@ -1666,8 +1795,8 @@ fun PlayerScreen(
     // tag get skipped and playback falls back to the default track (often Russian on
     // multi-audio releases). We additionally match on the track label here so the user's
     // chosen language wins regardless of how the track was tagged.
-    LaunchedEffect(audioTracks, uiState.preferredAudioLanguage, userPickedAudioForStream) {
-        if (playerReleased || userPickedAudioForStream) return@LaunchedEffect
+    LaunchedEffect(audioTracks, uiState.preferredAudioLanguage, userPickedAudioForStream, hasPlaybackStarted) {
+        if (playerReleased || userPickedAudioForStream || !hasPlaybackStarted) return@LaunchedEffect
         if (audioTracks.size < 2) return@LaunchedEffect
         val preferred = uiState.preferredAudioLanguage.trim()
         if (preferred.isBlank() || preferred.equals("none", ignoreCase = true)) return@LaunchedEffect
@@ -1676,6 +1805,16 @@ fun PlayerScreen(
         audioTracks.getOrNull(matchIndex)?.let { track ->
             applyAudioTrackSelection(exoPlayer, track, audioTracks)?.let {
                 selectedAudioIndex = it
+            }
+        }
+    }
+
+    // Auto-apply preferred audio language to Chromecast or sync selected index
+    LaunchedEffect(isCasting, remoteCastAudioTracks) {
+        if (isCasting && remoteCastAudioTracks.isNotEmpty()) {
+            val selectedIdx = remoteCastAudioTracks.indexOfFirst { it.isSelected }
+            if (selectedIdx >= 0) {
+                selectedAudioIndex = selectedIdx
             }
         }
     }
@@ -1737,6 +1876,14 @@ fun PlayerScreen(
         if (BuildConfig.DEBUG) {
         }
         if (url != null) {
+            if (isCasting) {
+                runCatching {
+                    exoPlayer.playWhenReady = false
+                    exoPlayer.stop()
+                    exoPlayer.clearMediaItems()
+                }
+                return@LaunchedEffect
+            }
             // Track when stream was selected (before any blocking probes)
             streamSelectedTime = System.currentTimeMillis()
             val prepareStartMs = streamSelectedTime ?: System.currentTimeMillis()
@@ -1891,6 +2038,7 @@ fun PlayerScreen(
             // media items here created a black gap before autoplay/manual sources.
             runCatching {
                 exoPlayer.playWhenReady = false
+                exoPlayer.stop()
             }
 
             val resumePosition = if (autoFallbackPosition >= 0L) {
@@ -1907,9 +2055,14 @@ fun PlayerScreen(
                 exoPlayer.setMediaSource(mediaSource)
             }
             // Let ExoPlayer's RAM-aware LoadControl handle startup buffering.
-            // No manual startup gate - trust the CDN/debrid while keeping enough safety margin.
-            exoPlayer.playWhenReady = true
-            exoPlayer.prepare()
+            // If currently casting to Chromecast, keep local ExoPlayer stopped so audio does not play on the phone.
+            if (isCasting) {
+                exoPlayer.playWhenReady = false
+                exoPlayer.stop()
+            } else {
+                exoPlayer.playWhenReady = true
+                exoPlayer.prepare()
+            }
             startupPhase = "Starting playback…"
             playbackStartupDiag(
                 "prepare issued setupMs=${System.currentTimeMillis() - prepareStartMs} source=${uiState.selectedStream?.addonId}/${uiState.selectedStream?.quality}/${uiState.selectedStream?.size} host=${runCatching { Uri.parse(url).host }.getOrNull().orEmpty()}"
@@ -2257,7 +2410,14 @@ fun PlayerScreen(
     LaunchedEffect(exoPlayer, isCasting) {
         while (!playerReleasedAtomic.get()) {
             if (playerReleasedAtomic.get()) break
-            if (isCasting) { delay(500); continue }
+            if (isCasting) {
+                if (!playerReleased && (exoPlayer.isPlaying || exoPlayer.playWhenReady)) {
+                    exoPlayer.playWhenReady = false
+                    exoPlayer.stop()
+                }
+                delay(500)
+                continue
+            }
             currentPosition = runCatching { exoPlayer.currentPosition }.getOrDefault(currentPosition)
             viewModel.onPlaybackPosition(currentPosition)
             val rawDuration = exoPlayer.duration
@@ -2374,7 +2534,8 @@ fun PlayerScreen(
                 group.type == C.TRACK_TYPE_VIDEO && group.length > 0
             }
             val blackVideoState =
-                uiState.selectedStreamUrl != null &&
+                !isCasting &&
+                    uiState.selectedStreamUrl != null &&
                     exoPlayer.playbackState == Player.STATE_READY &&
                     exoPlayer.playWhenReady &&
                     hasVideoTrack &&
@@ -2459,15 +2620,21 @@ fun PlayerScreen(
                 blackVideoReadySinceMs = null
             }
 
-            // Mark playback as started only after a real first frame for video sources.
-            // Audio-only streams can still start from READY/isPlaying.
-            if (!hasPlaybackStarted &&
-                readyAndPlaying &&
-                (!hasVideoTrack || firstVideoFrameRendered)
-            ) {
-                markPlaybackStarted(
-                    if (hasVideoTrack) "ready_playing_after_first_frame" else "ready_playing_audio_only"
-                )
+            // Mark playback as started:
+            // 1. Primary: once the video renderer paints the first frame (or audio-only stream is ready).
+            // 2. Anti-deadlock fallback: if audio is playing and position is advancing (or player has been ready & playing
+            //    for > 1.5s), unblock playback so the Compose loading overlay doesn't occlude the SurfaceView forever.
+            if (!hasPlaybackStarted) {
+                val sincePlayingMs = readyPlayingSinceMs
+                if (readyAndPlaying && (!hasVideoTrack || firstVideoFrameRendered)) {
+                    markPlaybackStarted(
+                        if (hasVideoTrack) "ready_playing_after_first_frame" else "ready_playing_audio_only"
+                    )
+                } else if (exoPlayer.isPlaying && (currentPosition > 500L || exoPlayer.currentPosition > 500L)) {
+                    markPlaybackStarted("playing_position_advancing")
+                } else if (readyAndPlaying && sincePlayingMs != null && (loopNowMs - sincePlayingMs) > 1500L) {
+                    markPlaybackStarted("ready_playing_timeout_fallback")
+                }
             }
 
             if (currentPosition > 0 && duration > 0) {
@@ -2489,12 +2656,16 @@ fun PlayerScreen(
 
             }
 
-            // Post-episode prompt: when a TV episode ends, show the "Up Next" overlay with a
-            // 10-second countdown that auto-advances (or lets the user cancel / continue
-            // immediately). Gated on the profile's autoPlayNext setting — when disabled we
-            // stay on the ended frame rather than silently advancing. Only trigger once per
-            // session (showNextEpisodePrompt guard) to avoid re-triggering on tick loops.
-            if (exoPlayer.playbackState == Player.STATE_ENDED &&
+            // Post-episode prompt: when a TV episode ends (locally or on Chromecast), show the "Up Next"
+            // overlay with a 10-second countdown that auto-advances.
+            val isCastNearEnd = isCasting && duration > 10_000L && currentPosition >= duration - 3_000L && currentPosition > 10_000L && !castManager.isRemotePlaying() && !castManager.isRemoteBuffering()
+            val isPlaybackEnded = hasPlaybackStarted && duration > 60_000L && (
+                (exoPlayer.playbackState == Player.STATE_ENDED) ||
+                (currentPosition > 30_000L && currentPosition >= (duration - 15_000L) && !exoPlayer.isPlaying) ||
+                (isCasting && (castManager.isPlaybackEnded() || isCastNearEnd))
+            )
+
+            if (isPlaybackEnded &&
                 mediaType == MediaType.TV &&
                 !showNextEpisodePrompt &&
                 !nextEpisodePromptDismissed &&
@@ -2504,7 +2675,9 @@ fun PlayerScreen(
             ) {
                 if (seasonNumber != null && episodeNumber != null && uiState.autoPlayNext) {
                     val nextEp = resolveNextEpisodeNumber(episodeNumber, uiState.seasonEpisodes)
-                    val hasNext = uiState.seasonEpisodes.isEmpty() || uiState.seasonEpisodes.any { it.episodeNumber > episodeNumber }
+                    val hasNext = uiState.seasonEpisodes.isNotEmpty() &&
+                        nextEp != null &&
+                        uiState.seasonEpisodes.any { it.episodeNumber == nextEp }
                     if (hasNext) {
                         val selected = uiState.selectedStream
                         pendingNextSeason = seasonNumber
@@ -2537,25 +2710,32 @@ fun PlayerScreen(
 
     DisposableEffect(Unit) {
         onDispose {
+            // Se estiver em Cast e sair para o catálogo, apenas pausa o receptor em vez de dar stop()
+            // para manter o receiver pronto para o próximo loadMedia sem cair em tela preta IDLE.
+            if (!isHandingOver && castManager.castState.value is CastManager.CastState.Casting) {
+                runCatching { castManager.pause() }
+            }
             controlsSeekJob?.cancel()
             playerReleasedAtomic.set(true)
             playerReleased = true
-            runCatching {
-                val safeDuration = exoPlayer.duration.takeIf { it > 0L && it != C.TIME_UNSET } ?: 0L
-                val safeProgressPercent = if (safeDuration > 0L) {
-                    ((exoPlayer.currentPosition.toDouble() / safeDuration.toDouble()) * 100.0)
-                        .toInt()
-                        .coerceIn(0, 100)
-                } else {
-                    0
+            if (!isHandingOver) {
+                runCatching {
+                    val safeDuration = exoPlayer.duration.takeIf { it > 0L && it != C.TIME_UNSET } ?: 0L
+                    val safeProgressPercent = if (safeDuration > 0L) {
+                        ((exoPlayer.currentPosition.toDouble() / safeDuration.toDouble()) * 100.0)
+                            .toInt()
+                            .coerceIn(0, 100)
+                    } else {
+                        0
+                    }
+                    viewModel.saveProgress(
+                        exoPlayer.currentPosition,
+                        safeDuration,
+                        safeProgressPercent,
+                        isPlaying = exoPlayer.isPlaying,
+                        playbackState = exoPlayer.playbackState
+                    )
                 }
-                viewModel.saveProgress(
-                    exoPlayer.currentPosition,
-                    safeDuration,
-                    safeProgressPercent,
-                    isPlaying = exoPlayer.isPlaying,
-                    playbackState = exoPlayer.playbackState
-                )
             }
             // Restore the system stream volume if the player left it at zero.
             // setStreamVolume(STREAM_MUSIC, 0) silences HDMI ARC, optical, and
@@ -2566,8 +2746,16 @@ fun PlayerScreen(
                 val restoreLevel = volumeBeforeMute.coerceAtLeast(1)
                 runCatching { audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, restoreLevel, 0) }
             }
-            coroutineScope.launch {
-                viewModel.telegramRepository.onPlaybackStopped()
+            if (!isHandingOver) {
+                val currentFileId = uiState.selectedStreamUrl?.let { url ->
+                    if (url.startsWith("tdfile://")) {
+                        val uri = android.net.Uri.parse(url)
+                        uri.authority?.toIntOrNull() ?: uri.lastPathSegment?.toIntOrNull() ?: -1
+                    } else -1
+                } ?: -1
+                coroutineScope.launch {
+                    viewModel.telegramRepository.onPlaybackStopped(currentFileId)
+                }
             }
         }
     }
@@ -2746,7 +2934,7 @@ fun PlayerScreen(
                             if (mediaType == MediaType.TV && seasonNumber != null && episodeNumber != null) {
                                 val selected = uiState.selectedStream
                                 val nextEp = resolveNextEpisodeNumber(episodeNumber, uiState.seasonEpisodes)
-                                onPlayNext(
+                                handlePlayNext(
                                     seasonNumber,
                                     nextEp,
                                     selected?.addonId?.takeIf { it.isNotBlank() },
@@ -2762,7 +2950,7 @@ fun PlayerScreen(
                             if (mediaType == MediaType.TV && seasonNumber != null && episodeNumber != null && episodeNumber > 1) {
                                 val selected = uiState.selectedStream
                                 val prevEp = resolvePrevEpisodeNumber(episodeNumber, uiState.seasonEpisodes)
-                                onPlayNext(
+                                handlePlayNext(
                                     seasonNumber,
                                     prevEp,
                                     selected?.addonId?.takeIf { it.isNotBlank() },
@@ -2791,7 +2979,7 @@ fun PlayerScreen(
                             isSelect -> {
                                 showNextEpisodePrompt = false
                                 if (nextEpisodePromptButton == 0) {
-                                    onPlayNext(
+                                    handlePlayNext(
                                         pendingNextSeason,
                                         pendingNextEpisode,
                                         pendingNextAddonId,
@@ -3242,8 +3430,8 @@ fun PlayerScreen(
             )
         }
 
-        // Loading screen overlay - keep visible until player is fully started.
-        if (uiState.isLoading || uiState.selectedStreamUrl == null || !hasPlaybackStarted) {
+        // Loading screen overlay - keep visible until player is fully started (only for local playback; when casting, the video is on the TV).
+        if (!isCasting && (uiState.isLoading || uiState.selectedStreamUrl == null || !hasPlaybackStarted)) {
             Box(
                 modifier = Modifier.fillMaxSize(),
                 contentAlignment = Alignment.Center
@@ -3435,7 +3623,7 @@ fun PlayerScreen(
                 currentPositionMs = currentPosition,
                 durationMs = duration,
                 bufferedPositionMs = exoPlayer.bufferedPosition,
-                audioTracks = audioTracks,
+                audioTracks = effectiveAudioTracks,
                 selectedAudioIndex = selectedAudioIndex,
                 currentPlaybackSpeed = currentPlaybackSpeed,
                 aspectModeLabel = aspectModeLabel,
@@ -3479,7 +3667,7 @@ fun PlayerScreen(
                 },
                 onSelectEpisode = { episode ->
                     val selected = uiState.selectedStream
-                    onPlayNext(
+                    handlePlayNext(
                         episode.seasonNumber,
                         episode.episodeNumber,
                         selected?.addonId?.takeIf { it.isNotBlank() },
@@ -3502,8 +3690,18 @@ fun PlayerScreen(
                 },
                 onSelectAudioTrack = { track ->
                     userPickedAudioForStream = true
-                    applyAudioTrackSelection(exoPlayer, track, audioTracks)?.let {
-                        selectedAudioIndex = it
+                    if (isCasting) {
+                        selectedAudioIndex = track.index
+                        val remoteTrack = remoteCastAudioTracks.getOrNull(track.index)
+                        if (remoteTrack != null) {
+                            castManager.setActiveAudioTrack(remoteTrack.id)
+                        } else {
+                            castManager.selectAudioTrack(track.language, track.label, track.index)
+                        }
+                    } else {
+                        applyAudioTrackSelection(exoPlayer, track, effectiveAudioTracks)?.let {
+                            selectedAudioIndex = it
+                        }
                     }
                 },
                 onSelectSubtitleTrack = { sub ->
@@ -3526,7 +3724,7 @@ fun PlayerScreen(
                 onSkipOutro = {
                     val selected = uiState.selectedStream
                     val nextEp = resolveNextEpisodeNumber(episodeNumber, uiState.seasonEpisodes)
-                    onPlayNext(
+                    handlePlayNext(
                         seasonNumber ?: 1,
                         nextEp,
                         selected?.addonId?.takeIf { it.isNotBlank() },
@@ -3538,7 +3736,7 @@ fun PlayerScreen(
                 onPlayNextEpisode = {
                     val selected = uiState.selectedStream
                     val nextEp = resolveNextEpisodeNumber(episodeNumber, uiState.seasonEpisodes)
-                    onPlayNext(
+                    handlePlayNext(
                         seasonNumber ?: 1,
                         nextEp,
                         selected?.addonId?.takeIf { it.isNotBlank() },
@@ -3548,7 +3746,7 @@ fun PlayerScreen(
                     )
                 },
                 canPlayNextEpisode = mediaType == MediaType.TV && seasonNumber != null && episodeNumber != null && (
-                    uiState.seasonEpisodes.isEmpty() || uiState.seasonEpisodes.any { it.episodeNumber > episodeNumber }
+                    uiState.seasonEpisodes.isNotEmpty() && uiState.seasonEpisodes.any { it.episodeNumber > episodeNumber }
                 ),
                 onDismissNextEpisode = {
                     showNextEpisodePrompt = false
@@ -3558,9 +3756,11 @@ fun PlayerScreen(
                     if (isCasting) {
                         castManager.disconnect()
                     } else {
-                        val dialog = androidx.mediarouter.app.MediaRouteChooserDialog(context)
-                        dialog.routeSelector = castManager.getRouteSelector()
-                        dialog.show()
+                        checkAndRequestNotificationPermission(NotificationRationaleType.CAST) {
+                            val dialog = androidx.mediarouter.app.MediaRouteChooserDialog(context)
+                            dialog.routeSelector = castManager.getRouteSelector()
+                            dialog.show()
+                        }
                     }
                 },
                 onRetryPlayback = {
@@ -3720,9 +3920,11 @@ fun PlayerScreen(
                                             if (isCasting) {
                                                 castManager.disconnect()
                                             } else {
-                                                val dialog = MediaRouteChooserDialog(context)
-                                                dialog.routeSelector = castManager.getRouteSelector()
-                                                dialog.show()
+                                                checkAndRequestNotificationPermission(NotificationRationaleType.CAST) {
+                                                    val dialog = MediaRouteChooserDialog(context)
+                                                    dialog.routeSelector = castManager.getRouteSelector()
+                                                    dialog.show()
+                                                }
                                             }
                                         },
                                     contentAlignment = Alignment.Center
@@ -3981,7 +4183,7 @@ fun PlayerScreen(
                                     val episode = episodeNumber ?: return@PlayerIconButton
                                     val selected = uiState.selectedStream
                                     val nextEp = resolveNextEpisodeNumber(episode, uiState.seasonEpisodes)
-                                    onPlayNext(
+                                    handlePlayNext(
                                         season,
                                         nextEp,
                                         selected?.addonId?.takeIf { it.isNotBlank() },
@@ -4129,7 +4331,7 @@ fun PlayerScreen(
                 isAiAvailable = uiState.isAiAvailable,
                 aiTargetLanguageName = uiState.aiTargetLanguageName,
                 matchLanguageName = uiState.matchLanguageName,
-                audioTracks = audioTracks,
+                audioTracks = effectiveAudioTracks,
                 selectedAudioIndex = selectedAudioIndex,
                 activeTab = subtitleMenuTab,
                 focusedIndex = subtitleMenuIndex,
@@ -4157,8 +4359,18 @@ fun PlayerScreen(
                 },
                 onSelectAudio = { track ->
                     userPickedAudioForStream = true
-                    applyAudioTrackSelection(exoPlayer, track, audioTracks)?.let {
-                        selectedAudioIndex = it
+                    if (isCasting) {
+                        selectedAudioIndex = track.index
+                        val remoteTrack = remoteCastAudioTracks.getOrNull(track.index)
+                        if (remoteTrack != null) {
+                            castManager.setActiveAudioTrack(remoteTrack.id)
+                        } else {
+                            castManager.selectAudioTrack(track.language, track.label, track.index)
+                        }
+                    } else {
+                        applyAudioTrackSelection(exoPlayer, track, effectiveAudioTracks)?.let {
+                            selectedAudioIndex = it
+                        }
                     }
                     showSubtitleMenu = false
                     showControls = true
@@ -4253,7 +4465,7 @@ fun PlayerScreen(
             onFocusedButtonChange = { nextEpisodePromptButton = it },
             onPlayNext = {
                 showNextEpisodePrompt = false
-                onPlayNext(
+                handlePlayNext(
                     pendingNextSeason,
                     pendingNextEpisode,
                     pendingNextAddonId,
@@ -4504,6 +4716,26 @@ fun PlayerScreen(
                 }
             }
         }
+    }
+
+    pendingNotificationRationale?.let { rationaleType ->
+        NotificationRationaleDialog(
+            type = rationaleType,
+            accentColor = playerAccent,
+            onConfirmEnable = {
+                pendingNotificationRationale = null
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
+                pendingActionAfterRationale?.invoke()
+                pendingActionAfterRationale = null
+            },
+            onDismiss = {
+                pendingNotificationRationale = null
+                pendingActionAfterRationale?.invoke()
+                pendingActionAfterRationale = null
+            }
+        )
     }
     }
 }
@@ -6714,14 +6946,21 @@ private fun guessCastMimeType(url: String, stream: StreamSource? = null): String
     if (urlLower.contains(".m3u8")) return "application/x-mpegURL"
     if (urlLower.contains(".mpd")) return "application/dash+xml"
 
-    val isTelegram = stream?.addonId?.contains("telegram", ignoreCase = true) == true
-    val filename = stream?.behaviorHints?.filename?.lowercase() ?: ""
+    val queryType = runCatching {
+        android.net.Uri.parse(url).getQueryParameter("type")?.lowercase()
+    }.getOrNull().orEmpty()
 
-    return when {
-        isTelegram || filename.endsWith(".mkv") -> "video/x-matroska"
-        filename.endsWith(".mp4") -> "video/mp4"
-        else -> "video/mp4"
-    }
+    val filename = stream?.behaviorHints?.filename?.lowercase().orEmpty()
+    val desc = stream?.description?.lowercase().orEmpty()
+    val title = stream?.addonTitle?.lowercase().orEmpty()
+    val isMkv = queryType.contains("matroska") || queryType.contains("mkv") ||
+                filename.endsWith(".mkv") || urlLower.contains(".mkv") ||
+                filename.contains(".mkv") || desc.contains(".mkv") || title.contains(".mkv")
+    val isWebm = queryType.contains("webm") || filename.endsWith(".webm") || urlLower.contains(".webm")
+
+    if (isWebm) return "video/webm"
+    if (isMkv) return "video/x-matroska"
+    return "video/mp4"
 }
 
 private fun resolveNextEpisodeNumber(currentEp: Int?, episodes: List<com.arflix.tv.data.model.Episode>): Int {

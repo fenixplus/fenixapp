@@ -250,7 +250,7 @@ fun ArvioMobilePlayer(
         showBars = areControlsVisible
     )
 
-    val isHeartbeatLoading = uiState.isLoading || uiState.selectedStreamUrl == null || !hasPlaybackStarted
+    val isHeartbeatLoading = !isCasting && (uiState.isLoading || uiState.selectedStreamUrl == null || !hasPlaybackStarted)
 
     // Auto-hide controls after 3.4 seconds of inactivity when playing and no panel is open
     LaunchedEffect(showControls, isPlaying, isScrubbing, anyPanelOpen, isLocked) {
@@ -414,8 +414,13 @@ fun ArvioMobilePlayer(
     var dismissedUpNext by remember(uiState.selectedStreamUrl) { mutableStateOf(false) }
 
     val activeSkip = uiState.activeSkipInterval
-    val isIntroInterval = activeSkip != null && !uiState.skipIntervalDismissed && activeSkip.type.lowercase() in listOf("intro", "op", "mixed-op", "recap")
-    val isOutroInterval = activeSkip != null && !uiState.skipIntervalDismissed && activeSkip.type.lowercase() in listOf("outro", "ed", "mixed-ed")
+    val isIntroInterval = hasPlaybackStarted && activeSkip != null && !uiState.skipIntervalDismissed && activeSkip.type.lowercase() in listOf("intro", "op", "mixed-op", "recap")
+    val isOutroInterval = hasPlaybackStarted &&
+        durationMs > 60_000L &&
+        activeSkip != null &&
+        activeSkip.startMs > (durationMs / 2) &&
+        !uiState.skipIntervalDismissed &&
+        activeSkip.type.lowercase() in listOf("outro", "ed", "mixed-ed")
 
     val isTv = uiState.mediaType == MediaType.TV || uiState.seasonNumber != null || !uiState.episodeTitle.isNullOrBlank()
     val nextEpisode = if (canPlayNextEpisode && uiState.seasonEpisodes.isNotEmpty()) {
@@ -441,7 +446,7 @@ fun ArvioMobilePlayer(
     val isUpNextActive = if (isOutroInterval && activeSkip != null && isTv && nextEpisode != null && !dismissedUpNext) {
         val upNextEndMs = (activeSkip.startMs + 10000L).coerceAtMost(activeSkip.endMs)
         currentPositionMs in activeSkip.startMs until upNextEndMs
-    } else if (!isOutroInterval && isTv && nextEpisode != null && !dismissedUpNext && durationMs > 20000L) {
+    } else if (!isOutroInterval && hasPlaybackStarted && isTv && nextEpisode != null && !dismissedUpNext && durationMs > 60_000L) {
         val fallbackStartMs = durationMs - 15000L
         val fallbackEndMs = durationMs - 5000L
         currentPositionMs in fallbackStartMs until fallbackEndMs
@@ -462,6 +467,7 @@ fun ArvioMobilePlayer(
 
     // Automatic progression belongs to the shared STATE_ENDED prompt, not timeline position.
     val promptState = remember(
+        hasPlaybackStarted,
         isIntroInterval,
         isOutroInterval,
         activeSkip,
@@ -474,6 +480,8 @@ fun ArvioMobilePlayer(
         isTv,
         uiState.autoPlayNext
     ) {
+        if (!hasPlaybackStarted) return@remember MobileContextPromptState.Hidden
+
         // 1. Skip Intro / Recap
         if (isIntroInterval && !dismissedIntro && activeSkip != null && currentPositionMs in activeSkip.startMs until activeSkip.endMs) {
             val label = when (activeSkip.type.lowercase()) {
@@ -505,7 +513,7 @@ fun ArvioMobilePlayer(
                     isAutoplay = false
                 )
             }
-        } else if (!isOutroInterval && isTv && nextEpisode != null && !dismissedUpNext && durationMs > 20000L) {
+        } else if (!isOutroInterval && isTv && nextEpisode != null && !dismissedUpNext && durationMs > 60_000L) {
             val fallbackStartMs = durationMs - 15000L
             val fallbackEndMs = durationMs - 5000L
             if (currentPositionMs in fallbackStartMs until fallbackEndMs) {

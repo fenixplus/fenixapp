@@ -18,11 +18,19 @@ internal class TelegramStreamAccess(
     private val token: String = newToken()
 ) {
     private val allowedFileIds = ConcurrentHashMap.newKeySet<Int>()
+    private val allowedLocalFiles = ConcurrentHashMap<String, java.io.File>()
 
     /** Registers [fileId] as streamable and returns the URL path that serves it. */
     fun pathFor(fileId: Int): String {
         allowedFileIds.add(fileId)
         return "/$token/file/$fileId"
+    }
+
+    /** Registers a local disk [file] as streamable and returns the URL path that serves it. */
+    fun pathForLocal(file: java.io.File): String {
+        val id = java.lang.Integer.toHexString(file.absolutePath.hashCode())
+        allowedLocalFiles[id] = file
+        return "/$token/local/$id"
     }
 
     /** True only for the current token and a file ID registered through [pathFor]. */
@@ -33,6 +41,17 @@ internal class TelegramStreamAccess(
             token.toByteArray(Charsets.UTF_8)
         )
         return tokenMatches && fileId in allowedFileIds
+    }
+
+    /** Returns the local file if the token is valid and the file was registered. */
+    fun getLocalFile(presentedToken: String?, id: String): java.io.File? {
+        if (presentedToken == null) return null
+        val tokenMatches = MessageDigest.isEqual(
+            presentedToken.toByteArray(Charsets.UTF_8),
+            token.toByteArray(Charsets.UTF_8)
+        )
+        if (!tokenMatches) return null
+        return allowedLocalFiles[id]?.takeIf { it.exists() && it.isFile }
     }
 
     companion object {

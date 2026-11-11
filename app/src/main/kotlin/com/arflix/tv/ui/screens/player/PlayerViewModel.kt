@@ -217,7 +217,8 @@ class PlayerViewModel @Inject constructor(
     val telegramRepository: TelegramRepository,
     private val fenixRepository: com.arflix.tv.data.telegram.FenixRepository,
     private val kidsContentFilter: com.arflix.tv.data.repository.KidsContentFilter,
-    val downloadManager: com.arflix.tv.data.download.DownloadManager
+    val downloadManager: com.arflix.tv.data.download.DownloadManager,
+    val castManager: com.arflix.tv.cast.CastManager
 ) : ViewModel() {
 
     fun isDownloading(fileId: Int): Boolean = downloadManager.isDownloading(fileId)
@@ -552,6 +553,9 @@ class PlayerViewModel @Inject constructor(
             mediaType = mediaType,
             seasonNumber = seasonNumber,
             episodeNumber = episodeNumber,
+            selectedStream = null,
+            selectedStreamUrl = null,
+            savedPosition = startPositionMs?.coerceAtLeast(0L) ?: 0L,
             overview = cachedItem?.overview,
             releaseYear = cachedItem?.year?.ifBlank { null } ?: cachedItem?.releaseDate?.take(4),
             seasonEpisodes = emptyList(),
@@ -823,7 +827,8 @@ class PlayerViewModel @Inject constructor(
                     val uri = android.net.Uri.parse(resolvedProvidedUrl)
                     uri.authority?.toIntOrNull() ?: uri.lastPathSegment?.toIntOrNull() ?: -1
                 } else -1
-                if (currentFileId > 0) {
+                val isCurrentlyCasting = castManager.castState.value is com.arflix.tv.cast.CastManager.CastState.Casting
+                if (currentFileId > 0 && !isCurrentlyCasting) {
                     telegramRepository.onVideoLoading(currentFileId)
                 }
                 // NOTE: these background children share the load job — an uncaught exception in
@@ -2620,7 +2625,8 @@ class PlayerViewModel @Inject constructor(
                 val uri = android.net.Uri.parse(effectiveUrl)
                 uri.authority?.toIntOrNull() ?: uri.lastPathSegment?.toIntOrNull() ?: -1
             } else -1
-            if (currentFileId > 0) {
+            val isCurrentlyCasting = castManager.castState.value is com.arflix.tv.cast.CastManager.CastState.Casting
+            if (currentFileId > 0 && !isCurrentlyCasting) {
                 telegramRepository.onVideoLoading(currentFileId)
             }
 
@@ -3988,16 +3994,27 @@ class PlayerViewModel @Inject constructor(
         episodeNumber: Int?,
         navigationStartPositionMs: Long?
     ): ResumeData {
+        if (navigationStartPositionMs != null && navigationStartPositionMs > 0L) {
+            return ResumeData(positionMs = navigationStartPositionMs)
+        }
         val navStart = navigationStartPositionMs?.coerceAtLeast(0L) ?: 0L
 
-        val cloudEntry = watchHistoryRepository.getProgress(mediaType, mediaId, seasonNumber, episodeNumber)
+        val cloudEntry = watchHistoryRepository.getProgress(mediaType, mediaId, seasonNumber, episodeNumber)?.takeIf { entry ->
+            if (mediaType == MediaType.TV) {
+                entry.season == seasonNumber && entry.episode == episodeNumber
+            } else true
+        }
         val cloudPositionMs = cloudEntry?.let { entry ->
             computeResumePositionMs(entry, mediaType, mediaId, seasonNumber, episodeNumber)
         } ?: 0L
 
         val localEntry = runCatching {
             traktRepository.getLocalContinueWatchingEntry(mediaType, mediaId, seasonNumber, episodeNumber)
-        }.getOrNull()
+        }.getOrNull()?.takeIf { item ->
+            if (mediaType == MediaType.TV) {
+                item.season == seasonNumber && item.episode == episodeNumber
+            } else true
+        }
 
         val localPositionMs = localEntry?.let { item ->
             when {
@@ -4836,17 +4853,60 @@ class PlayerViewModel @Inject constructor(
     fun launchExternalPlayer(context: Context, stream: StreamSource) {
         viewModelScope.launch {
             val rawUrl = stream.url ?: return@launch
+            val position = _uiState.value.savedPosition
+            val title = _uiState.value.title
+
             if (rawUrl.startsWith("tdfile://")) {
                 val uri = android.net.Uri.parse(rawUrl)
                 val fileId = uri.authority?.toIntOrNull() ?: uri.lastPathSegment?.toIntOrNull()
                 if (fileId != null && fileId > 0) {
                     val mimeType = uri.getQueryParameter("type") ?: "video/*"
-                    ExternalPlayer.handOver(
+
+                    // 1. Se o arquivo estiver 100% baixado no disco, abre direto via FileProvider
+                    val file = telegramClient.getFile(fileId)
+                    val local = file?.local
+                    val diskFile = local?.path?.takeIf { it.isNotBlank() }?.let { java.io.File(it) }
+
+                    if (local?.isDownloadingCompleted == true && diskFile?.exists() == true && diskFile.length() > 0) {
+                        ExternalPlayer.launchFile(
+                            context = context,
+                            file = diskFile,
+                            title = title,
+                            mimeType = mimeType,
+                            positionMs = position
+                        )
+                        return@launch
+                    }
+
+                    // 2. Para streaming online, usa o Proxy HTTP local (Ktor) com suporte a Range requests
+                    // para permitir avançar/retroceder no player externo sem fechar por EOF
+                    telegramRepository.startProxyService()
+                    withTimeoutOrNull(5000) {
+                        telegramRepository.isProxyReady.filter { it }.first()
+                    }
+                    val proxyUrl = telegramRepository.getProxyStreamUrl(fileId)
+
+                    ExternalPlayer.launchUrl(
                         context = context,
-                        client = telegramClient,
-                        fileId = fileId,
-                        title = _uiState.value.title,
-                        mimeType = mimeType
+                        url = proxyUrl,
+                        title = title,
+                        mimeType = mimeType,
+                        positionMs = position
+                    )
+                    return@launch
+                }
+            }
+
+            // Arquivo local offline (ex: download finalizado file://...)
+            if (rawUrl.startsWith("file://")) {
+                val localFile = java.io.File(android.net.Uri.parse(rawUrl).path ?: "")
+                if (localFile.exists()) {
+                    ExternalPlayer.launchFile(
+                        context = context,
+                        file = localFile,
+                        title = title,
+                        mimeType = "video/*",
+                        positionMs = position
                     )
                     return@launch
                 }
@@ -4859,44 +4919,63 @@ class PlayerViewModel @Inject constructor(
             val resolvedStream = resolvedResult.getOrNull() ?: stream
             val url = resolvedStream.url ?: return@launch
 
-            // MODO 2: Same Task
-            // Usamos o contexto da Activity e NÃO adicionamos FLAG_ACTIVITY_NEW_TASK.
-            // Isso garante que o player abra na mesma stack do Fênix.
-            val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(android.net.Uri.parse(url), "video/*")
-                putExtra("title", _uiState.value.title)
-                // VLC extras
-                putExtra("title", _uiState.value.title)
-                // MX Player extras
-                putExtra("sticky_style", false)
-            }
-
-            // Resume position
-            val position = _uiState.value.savedPosition
-            if (position > 0) {
-                intent.putExtra("position", position.toInt()) // MX uses ms
-                intent.putExtra("start-time", position) // VLC uses ms
-            }
-
-            try {
-                // Usamos o contexto recebido (que deve ser uma Activity)
-                context.startActivity(intent)
-            } catch (e: Exception) {
-                // Fallback para chooser se falhar direta
-                try {
-                    context.startActivity(Intent.createChooser(intent, "Abrir com..."))
-                } catch (e2: Exception) {
-                    Log.e(TAG, "Failed to launch external player", e2)
-                }
-            }
+            ExternalPlayer.launchUrl(
+                context = context,
+                url = url,
+                title = title,
+                mimeType = "video/*",
+                positionMs = position
+            )
         }
+    }
+
+    /**
+     * Resolve uma URL compatível para streaming via Google Cast (Chromecast).
+     *
+     * No modo Cast (Opção 2 - TMPlayer Engine):
+     * - O TelegramStreamingProxy (Ktor) NÃO é iniciado para Cast, evitando concorrência no TDLib.
+     * - Se o proxy estiver rodando (ex: player externo anterior), ele é interrompido.
+     * - Para streams do Telegram (tdfile://) ou arquivos locais (file://), a URL original é mantida
+     *   para que o CastHlsServer / TdCastSource sirva diretamente via DataSource.Factory (HLS fMP4).
+     */
+    suspend fun resolveCastUrl(rawUrl: String, context: Context, mimeType: String? = null): String? {
+        val wifiIp = com.arflix.tv.util.DeviceIpAddress.get(context) ?: "127.0.0.1"
+
+        // Para Cast, garantimos que o proxy Ktor de player externo NÃO dispute o TDLib
+        runCatching { telegramRepository.stopProxyService() }
+
+        if (rawUrl.startsWith("tdfile://") || rawUrl.startsWith("file://")) {
+            return rawUrl
+        }
+
+        if (rawUrl.contains("127.0.0.1") || rawUrl.contains("localhost")) {
+            var ipUrl = rawUrl.replace("127.0.0.1", wifiIp).replace("localhost", wifiIp)
+            if (!mimeType.isNullOrBlank() && !ipUrl.contains("mime=")) {
+                ipUrl = if (ipUrl.contains("?")) "$ipUrl&mime=$mimeType" else "$ipUrl?mime=$mimeType"
+            }
+            return ipUrl
+        }
+
+        return rawUrl
     }
 
     override fun onCleared() {
         super.onCleared()
-        telegramRepository.stopProxyService()
-        viewModelScope.launch(Dispatchers.IO) {
-            telegramRepository.onPlaybackStopped()
+        val isCasting = runCatching {
+            castManager.castState.value is com.arflix.tv.cast.CastManager.CastState.Casting
+        }.getOrDefault(false)
+        if (!isCasting) {
+            val stoppedFileId = _uiState.value.selectedStreamUrl?.let { url ->
+                if (url.startsWith("tdfile://")) {
+                    val uri = android.net.Uri.parse(url)
+                    uri.authority?.toIntOrNull() ?: uri.lastPathSegment?.toIntOrNull() ?: -1
+                } else -1
+            } ?: -1
+            if (stoppedFileId > 0) {
+                kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+                    telegramRepository.onPlaybackStopped(stoppedFileId)
+                }
+            }
         }
     }
 
